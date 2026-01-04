@@ -1,7 +1,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { config } from '../core/config';
 import { logger } from '../core/logger';
-import { MemoryFact, MemoryContext } from '../types';
+import { MemoryContext, MemoryFact } from '../types/graph';
 
 export interface Mem0Memory {
   id: string;

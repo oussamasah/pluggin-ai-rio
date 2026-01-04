@@ -184,10 +184,15 @@ app.post('/query/stream', async (req: Request, res: Response, next: NextFunction
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
 
-    // Helper function to send SSE events
+    // Helper function to send SSE events with immediate flushing
     const sendEvent = (type: string, data: any) => {
       try {
-        res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+        const message = `data: ${JSON.stringify({ type, ...data })}\n\n`;
+        res.write(message);
+        // Force flush to ensure chunks are sent immediately (not buffered)
+        if (typeof (res as any).flush === 'function') {
+          (res as any).flush();
+        }
       } catch (error) {
         // Client disconnected, stop sending
         return false;
@@ -220,10 +225,18 @@ app.post('/query/stream', async (req: Request, res: Response, next: NextFunction
         },
         onChunk: (chunk) => {
           accumulatedText += chunk;
+          // Send chunk immediately - flush is handled in sendEvent
           sendEvent('chunk', {
             text: chunk,
             accumulated: accumulatedText,
           });
+          // Log first few chunks for debugging
+          if (accumulatedText.length < 100) {
+            logger.debug('Streaming chunk received', { 
+              chunkLength: chunk.length, 
+              accumulatedLength: accumulatedText.length 
+            });
+          }
         },
         onError: (error) => {
           sendEvent('error', {

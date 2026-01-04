@@ -62,7 +62,14 @@ export async function responderNode(state: GraphState): Promise<Partial<GraphSta
     const streamCallbacks = getStreamCallbacks();
     const useStreaming = !!streamCallbacks?.onChunk;
 
+    // Send progress update when starting to generate response
+    if (useStreaming && streamCallbacks.onProgress) {
+      streamCallbacks.onProgress('responder', 'Generating response...', 90);
+    }
+
     // Use streaming if callbacks are available, otherwise use regular chat
+    // IMPORTANT: chatStream() will call onChunk for each chunk as it arrives
+    // The node will still await the full stream, but chunks are sent in real-time
     const response = useStreaming
       ? await llmService.chatStream(
           [
@@ -72,7 +79,12 @@ export async function responderNode(state: GraphState): Promise<Partial<GraphSta
           {
             model: config.models.planner,
             temperature: 0.4,
-            onChunk: streamCallbacks.onChunk, // Stream chunks in real-time
+            onChunk: (chunk: string) => {
+              // Call the chunk callback immediately - this should flush to client
+              if (streamCallbacks.onChunk) {
+                streamCallbacks.onChunk(chunk);
+              }
+            },
           }
         )
       : await llmService.chat(

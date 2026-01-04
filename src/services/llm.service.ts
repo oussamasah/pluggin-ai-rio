@@ -218,11 +218,13 @@ export class LLMService {
         let buffer = '';
 
         return new Promise<LLMResponse>((resolve, reject) => {
+          let chunkCount = 0;
+          
           response.data.on('data', (chunk: Buffer) => {
             // Accumulate chunks in buffer (SSE can split across multiple chunks)
             buffer += chunk.toString();
             
-            // Process complete lines
+            // Process complete lines immediately
             const lines = buffer.split('\n');
             // Keep incomplete line in buffer
             buffer = lines.pop() || '';
@@ -235,6 +237,10 @@ export class LLMService {
                 const data = trimmedLine.slice(6);
                 
                 if (data === '[DONE]') {
+                  logger.debug('LLM stream completed', { 
+                    totalChunks: chunkCount, 
+                    totalLength: fullContent.length 
+                  });
                   resolve({
                     content: fullContent,
                     model: modelName,
@@ -250,10 +256,17 @@ export class LLMService {
                   if (delta?.content) {
                     const chunkText = delta.content;
                     fullContent += chunkText;
+                    chunkCount++;
                     
                     // Call the chunk callback immediately for real-time streaming
+                    // This should be called synchronously as chunks arrive from the stream
                     if (onChunk) {
-                      onChunk(chunkText);
+                      try {
+                        // Call immediately - don't await or delay
+                        onChunk(chunkText);
+                      } catch (error) {
+                        logger.error('Error in onChunk callback', { error: (error as Error).message });
+                      }
                     }
                   }
 

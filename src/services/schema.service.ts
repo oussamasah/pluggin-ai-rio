@@ -22,7 +22,7 @@ export interface FieldDefinition {
 export interface Relationship {
   field: string;
   targetCollection: string;
-  type: 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
+  type: "one-to-one" | "one-to-many" | "many-to-many" | "many-to-one";
   via?: string;
 }
 
