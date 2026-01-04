@@ -317,14 +317,32 @@ export async function retrieverNode(state: GraphState): Promise<Partial<GraphSta
       const hasCompanyIdPlaceholderInId = queryToExecute._id && typeof queryToExecute._id === 'object' && 
           queryToExecute._id.$in && 
           Array.isArray(queryToExecute._id.$in) &&
-          queryToExecute._id.$in.some((id: string) => id.includes('FROM_STEP') && id.includes('COMPANY'));
+          queryToExecute._id.$in.some((id: any) => typeof id === 'string' && (id.includes('FROM_STEP') && id.includes('COMPANY')));
       
       const hasCompanyIdPlaceholderInCompanyId = queryToExecute.companyId && typeof queryToExecute.companyId === 'object' && 
           queryToExecute.companyId.$in && 
           Array.isArray(queryToExecute.companyId.$in) &&
-          queryToExecute.companyId.$in.some((id: string) => id.includes('FROM_STEP') && id.includes('COMPANY'));
+          queryToExecute.companyId.$in.some((id: any) => typeof id === 'string' && (id.includes('FROM_STEP') && id.includes('COMPANY')));
+      
+      logger.debug('Retriever: Checking for company ID placeholders', {
+        stepId: fetchStep.stepId,
+        collection: fetchStep.collection,
+        hasCompanyIdPlaceholderInId,
+        hasCompanyIdPlaceholderInCompanyId,
+        companyIdQuery: queryToExecute.companyId ? JSON.stringify(queryToExecute.companyId) : undefined,
+        _idQuery: queryToExecute._id ? JSON.stringify(queryToExecute._id) : undefined
+      });
       
       if (hasCompanyIdPlaceholderInId || hasCompanyIdPlaceholderInCompanyId) {
+        logger.info('Retriever: Company ID placeholder detected, attempting replacement', {
+          stepId: fetchStep.stepId,
+          collection: fetchStep.collection,
+          hasCompanyIdPlaceholderInId,
+          hasCompanyIdPlaceholderInCompanyId,
+          dependencies: fetchStep.dependencies,
+          allRetrievedDataCount: allRetrievedData.length,
+          allRetrievedDataCollections: allRetrievedData.map((d: any) => d.collection)
+        });
         // Find companies from previous steps or from dependency step
         let companyIds: string[] = [];
         
@@ -333,9 +351,10 @@ export async function retrieverNode(state: GraphState): Promise<Partial<GraphSta
           for (const depStepId of fetchStep.dependencies) {
             const depStep = state.plan?.steps?.find((s: any) => s.stepId === depStepId);
             if (depStep && depStep.collection === 'companies') {
-              // Find data from this dependency step
+              // Find data from this dependency step - look for companies collection data
+              // Since steps execute sequentially, the dependency step's data should already be in allRetrievedData
               const depStepData = allRetrievedData.find((d: any) => 
-                d.stepId === depStepId || (d.collection === 'companies' && d.documents.length > 0)
+                d.collection === 'companies' && d.documents && d.documents.length > 0
               );
               if (depStepData && depStepData.documents && depStepData.documents.length > 0) {
                 companyIds = depStepData.documents
@@ -344,9 +363,18 @@ export async function retrieverNode(state: GraphState): Promise<Partial<GraphSta
                 logger.info('Retriever: Extracted company IDs from dependency step', {
                   stepId: fetchStep.stepId,
                   dependencyStepId: depStepId,
-                  companyIdsCount: companyIds.length
+                  dependencyCollection: depStep.collection,
+                  companyIdsCount: companyIds.length,
+                  companyIds: companyIds.slice(0, 3)
                 });
                 break;
+              } else {
+                logger.warn('Retriever: Dependency step data not found yet', {
+                  stepId: fetchStep.stepId,
+                  dependencyStepId: depStepId,
+                  dependencyCollection: depStep.collection,
+                  allRetrievedDataCollections: allRetrievedData.map((d: any) => d.collection)
+                });
               }
             }
           }
@@ -410,7 +438,6 @@ export async function retrieverNode(state: GraphState): Promise<Partial<GraphSta
             delete queryToExecute.companyId;
           }
         }
-      }
       }
       
       logger.debug('Retriever: About to execute fetch step', {
