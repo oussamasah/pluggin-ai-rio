@@ -269,8 +269,12 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
     }
     
     // Check if query explicitly requests "all" companies/employees
+    // Also detect "my database companies", "my companies", "details about my companies" as requests for all companies
     const requestsAll = /\b(all|every|each)\s+(compan(?:y|ies)|employee|employees|decision\s+maker|executive)\b/i.test(state.originalQuery) ||
-                        /\b(all|every|each)\s+(of\s+)?(the|these|those|my|our)\s+(compan(?:y|ies)|employee|employees)\b/i.test(state.originalQuery);
+                        /\b(all|every|each)\s+(of\s+)?(the|these|those|my|our)\s+(compan(?:y|ies)|employee|employees)\b/i.test(state.originalQuery) ||
+                        /\b(my|our)\s+(database\s+)?compan(?:y|ies)\b/i.test(state.originalQuery) ||
+                        /\b(details|information|list|show|give)\s+(me\s+)?(about|of|for)\s+(my|our)\s+(database\s+)?compan(?:y|ies)\b/i.test(state.originalQuery) ||
+                        /\b(details|information|list|show|give)\s+(about|of|for)\s+(my|our)\s+(database\s+)?compan(?:y|ies)\b/i.test(state.originalQuery);
     
     const hasCompanyName = detectedCompanyName !== null || 
                           /\b(this|that|the)\s+company\b/i.test(state.originalQuery);
@@ -1293,6 +1297,47 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
         requiresHopping: response.intent?.requiresHopping,
         hasHopStep: response.plan?.steps?.some((s: any) => s.action === 'hop'),
         steps: response.plan?.steps?.map((s: any) => s.action)
+      });
+    }
+    
+    // CRITICAL: If query requests "all" or "my database companies", remove industry filters and set higher limits
+    if (requestsAll && response.plan?.steps) {
+      logger.info('Planner: "All companies" or "my database companies" detected - removing filters and setting higher limits', {
+        query: state.originalQuery,
+        requestsAll
+      });
+      
+      // Find all company fetch steps and remove industry filters
+      const companySteps = response.plan.steps.filter((s: any) => 
+        s.collection === 'companies' && s.action === 'fetch'
+      );
+      
+      companySteps.forEach((step: any) => {
+        // Remove industry filter if present (but keep other filters like userId)
+        if (step.query && step.query.industry) {
+          logger.info('Planner: Removing industry filter for "all companies" query', {
+            stepId: step.stepId,
+            removedFilter: step.query.industry,
+            query: state.originalQuery,
+            otherFilters: Object.keys(step.query).filter(k => k !== 'industry')
+          });
+          // Remove only the industry filter, keep other filters
+          const { industry, ...restOfQuery } = step.query;
+          step.query = restOfQuery;
+          // Ensure userId is present
+          if (!step.query.userId) {
+            step.query.userId = state.userId;
+          }
+        }
+        
+        // Set higher limit for "all" queries
+        if (!step.limit || step.limit < 500) {
+          step.limit = 500;
+          logger.info('Planner: Increased limit for "all companies" query', {
+            stepId: step.stepId,
+            newLimit: step.limit
+          });
+        }
       });
     }
     
