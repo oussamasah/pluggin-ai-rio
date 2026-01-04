@@ -178,6 +178,30 @@ export async function retrieverNode(state: GraphState): Promise<Partial<GraphSta
         };
       }
       
+      // Check if this is an informational/clarification query that doesn't need data
+      const isInformationalQuery = state.intent?.type === 'informational' || 
+                                   state.intent?.type === 'clarification' ||
+                                   /\b(what|who|how|when|where|why|can you|do you|are you|your mission|your purpose|help me|what can|what do)\b/i.test(state.originalQuery || '');
+      
+      if (isInformationalQuery) {
+        logger.info('Retriever: Informational/clarification query detected - routing directly to responder', {
+          intentType: state.intent?.type,
+          query: state.originalQuery?.substring(0, 50)
+        });
+        
+        // Route directly to responder for informational queries
+        return {
+          retrievedData: [],
+          flattenedData: [],
+          lastViewedCompanyIds: state.lastViewedCompanyIds || [],
+          lastViewedEmployeeIds: state.lastViewedEmployeeIds || [],
+          lastViewedIcpModelIds: state.lastViewedIcpModelIds || [],
+          currentNode: 'responder',
+          // Mark as informational so responder knows to handle it without analysis
+          intent: { ...state.intent, type: 'informational' },
+        };
+      }
+      
       // If no fetch steps and no previous results, handle gracefully instead of crashing
       logger.warn('Retriever: No fetch steps and no previous results - routing to responder with empty data', {
         intentType: state.intent?.type,

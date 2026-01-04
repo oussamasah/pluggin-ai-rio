@@ -1114,25 +1114,34 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
         
         // ALWAYS ensure correct sort and limit for fit score queries (regardless of ICP reference)
         companyFetchSteps.forEach((step: any) => {
-          // CRITICAL: Remove any $gt, $gte, $lt, $lte filters on fit score - we only want existence check
-          // The LLM sometimes adds {"$gt": 50} which is wrong - we just want top N sorted
+          // CRITICAL: Ensure we only get companies with actual numeric fit scores
+          // Use $gte: 0 to ensure it's a valid number >= 0 (this also implies $exists: true and $ne: null)
+          // This is more reliable than $exists + $type for nested fields
           if (step.query['scoringMetrics.fit_score.score']) {
             const fitScoreFilter = step.query['scoringMetrics.fit_score.score'];
-            // If it's an object with operators like $gt, $gte, etc., replace with existence check
-            if (typeof fitScoreFilter === 'object' && !fitScoreFilter.$exists) {
-              logger.warn('Planner: Removing invalid fit score filter, replacing with existence check', {
+            // If it's an object with operators like $gt, $gte, etc., check if it's valid
+            if (typeof fitScoreFilter === 'object' && !fitScoreFilter.$gte && !fitScoreFilter.$gt) {
+              logger.warn('Planner: Removing invalid fit score filter, replacing with strict numeric check', {
                 stepId: step.stepId,
                 originalFilter: fitScoreFilter,
                 query: state.originalQuery
               });
-              step.query['scoringMetrics.fit_score.score'] = { $exists: true, $ne: null };
-            } else if (!fitScoreFilter.$exists) {
-              // If it's not an existence check, make it one
-              step.query['scoringMetrics.fit_score.score'] = { $exists: true, $ne: null };
+              // Use strict filter: must be a number >= 0 (this ensures it exists and is numeric)
+              step.query['scoringMetrics.fit_score.score'] = { 
+                $gte: 0
+              };
+            } else if (!fitScoreFilter.$gte && !fitScoreFilter.$gt) {
+              // If it doesn't have a numeric check, add it
+              step.query['scoringMetrics.fit_score.score'] = { 
+                $gte: 0
+              };
             }
           } else {
-            // Ensure fit score exists (not null/undefined)
-            step.query['scoringMetrics.fit_score.score'] = { $exists: true, $ne: null };
+            // Ensure fit score exists and is a valid number >= 0
+            // Using $gte: 0 ensures the field exists, is not null, and is a number >= 0
+            step.query['scoringMetrics.fit_score.score'] = { 
+              $gte: 0
+            };
           }
           
           // CRITICAL: Set limit to requested "top N" if specified, otherwise use step's limit or default based on query type

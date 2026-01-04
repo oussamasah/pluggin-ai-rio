@@ -49,6 +49,83 @@ export async function responderNode(state: GraphState): Promise<Partial<GraphSta
       };
     }
 
+    // Handle informational/clarification queries that don't need data or analysis
+    // Check intent type as string to handle any type values
+    const intentTypeStr = state.intent?.type as string;
+    const isInformationalQuery = intentTypeStr === 'informational' || 
+                                 intentTypeStr === 'clarification' ||
+                                 (!state.analysis && 
+                                  state.retrievedData.length > 0 &&
+                                  state.retrievedData.every(r => r.documents.length === 0) &&
+                                  /\b(what|who|how|when|where|why|can you|do you|are you|your mission|your purpose|help me|what can|what do|what data|what information|access to)\b/i.test(state.originalQuery || ''));
+    
+    // Check if streaming is enabled (via callbacks)
+    const streamCallbacks = getStreamCallbacks();
+    const useStreaming = !!streamCallbacks?.onChunk;
+    
+    if (isInformationalQuery && !state.analysis) {
+      logger.info('Responder: Handling informational query without analysis', {
+        intentType: state.intent?.type,
+        query: state.originalQuery?.substring(0, 50)
+      });
+      
+      // For informational queries, generate response directly without analysis
+      const informationalPrompt = `You are RIO (Revenue Intelligence Operating System), an AI assistant that helps revenue teams make data-driven decisions.
+
+Your capabilities:
+- Search and analyze company data
+- Find decision makers and executives
+- Analyze ICP (Ideal Customer Profile) fit scores
+- Generate insights about companies and employees
+- Create personalized email sequences
+- Help with account-based selling strategies
+- Execute actions like sending data to CRM systems
+
+You have access to:
+- Company databases (with industry, revenue, employee count, fit scores)
+- Employee/decision maker profiles
+- ICP models
+- GTM intelligence data
+- Persona intelligence data
+
+User Query: ${state.originalQuery}
+
+Provide a helpful, concise response about your mission and how you can help the user. Be friendly and professional.`;
+
+      const response = useStreaming
+        ? await llmService.chatStream(
+            [
+              { role: 'system', content: informationalPrompt },
+              { role: 'user', content: state.originalQuery || 'How can you help me?' },
+            ],
+            {
+              model: config.models.planner,
+              temperature: 0.4,
+              onChunk: (chunk: string) => {
+                if (streamCallbacks?.onChunk) {
+                  streamCallbacks.onChunk(chunk);
+                }
+              },
+            }
+          )
+        : await llmService.chat(
+            [
+              { role: 'system', content: informationalPrompt },
+              { role: 'user', content: state.originalQuery || 'How can you help me?' },
+            ],
+            {
+              model: config.models.planner,
+              temperature: 0.4,
+            }
+          );
+
+      return {
+        finalAnswer: response.content,
+        currentNode: 'end',
+        confidence: 0.9,
+      };
+    }
+
     if (!state.analysis) {
       return {
         finalAnswer: 'I was unable to process your request. Please try again with a different query.',
@@ -63,10 +140,6 @@ export async function responderNode(state: GraphState): Promise<Partial<GraphSta
       state.executedActions,
       state.retrievedData // Pass actual retrieved data for validation
     );
-
-    // Check if streaming is enabled (via callbacks)
-    const streamCallbacks = getStreamCallbacks();
-    const useStreaming = !!streamCallbacks?.onChunk;
 
     // Use streaming if callbacks are available, otherwise use regular chat
     // IMPORTANT: chatStream() will call onChunk for each chunk as it arrives
