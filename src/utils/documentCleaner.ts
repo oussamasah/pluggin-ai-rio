@@ -385,6 +385,18 @@ export class DocumentCleaner {
     const cleaned: any = {};
     
     Object.entries(doc).forEach(([key, value]) => {
+      // CRITICAL: Always preserve scoringMetrics - it might have nested fit_score data
+      if (key === 'scoringMetrics' && value && typeof value === 'object') {
+        // Check if scoringMetrics has any nested data (fit_score.score, fitScore.score, etc.)
+        const hasNestedData = (value.fit_score && (value.fit_score.score !== undefined || value.fit_score.confidence !== undefined)) ||
+                             (value.fitScore && (value.fitScore.score !== undefined || value.fitScore.confidence !== undefined)) ||
+                             (value.score !== undefined || value.confidence !== undefined);
+        if (hasNestedData) {
+          cleaned[key] = value; // Preserve it
+          return;
+        }
+      }
+      
       if (value === null || value === undefined || value === '') {
         return;
       }
@@ -465,22 +477,72 @@ export class DocumentCleaner {
     const processed: any = { ...doc };
     
     // Special handling for scoring metrics in fit score queries
+    // CRITICAL: Preserve the scoringMetrics structure - don't delete or flatten it
     if (processed.scoringMetrics) {
+      // For fit score queries, ensure we preserve the full structure
       if (context === 'fit_score_query' || context === 'top_n_query') {
-        // Keep only essential scoring info
-        processed.score = processed.scoringMetrics.fitScore?.score || 
-                         processed.scoringMetrics.score;
-        processed.scoreConfidence = processed.scoringMetrics.fitScore?.confidence ||
-                                   processed.scoringMetrics.confidence;
-        delete processed.scoringMetrics;
+        // Keep the scoringMetrics structure intact, but ensure it has the correct nested structure
+        if (processed.scoringMetrics.fit_score) {
+          // Structure is already correct: scoringMetrics.fit_score.score
+          // Just ensure it's not empty
+          if (!processed.scoringMetrics.fit_score.score && 
+              processed.scoringMetrics.fit_score.score !== 0) {
+            // If score is missing but we have it elsewhere, try to preserve it
+            const score = processed.scoringMetrics.score || 
+                         processed.scoringMetrics.fitScore?.score;
+            const confidence = processed.scoringMetrics.confidence || 
+                              processed.scoringMetrics.fitScore?.confidence;
+            if (score !== undefined || confidence !== undefined) {
+              processed.scoringMetrics.fit_score = {
+                ...processed.scoringMetrics.fit_score,
+                score: score !== undefined ? score : processed.scoringMetrics.fit_score.score,
+                confidence: confidence !== undefined ? confidence : processed.scoringMetrics.fit_score.confidence
+              };
+            }
+          }
+        } else if (processed.scoringMetrics.fitScore) {
+          // Convert fitScore to fit_score to match schema
+          processed.scoringMetrics.fit_score = {
+            score: processed.scoringMetrics.fitScore.score,
+            confidence: processed.scoringMetrics.fitScore.confidence
+          };
+          delete processed.scoringMetrics.fitScore;
+        } else if (processed.scoringMetrics.score !== undefined) {
+          // If we have a flat score, create the nested structure
+          processed.scoringMetrics.fit_score = {
+            score: processed.scoringMetrics.score,
+            confidence: processed.scoringMetrics.confidence
+          };
+          // Keep the original structure but ensure fit_score exists
+        }
+        // DO NOT delete scoringMetrics - preserve it for fit score queries
       } else {
-        // Compress scoring metrics
-        processed.scoringMetrics = {
-          score: processed.scoringMetrics.fitScore?.score || 
-                 processed.scoringMetrics.score,
-          confidence: processed.scoringMetrics.fitScore?.confidence ||
-                     processed.scoringMetrics.confidence
-        };
+        // For other queries, compress but preserve structure
+        if (processed.scoringMetrics.fit_score) {
+          // Keep the nested structure
+          processed.scoringMetrics = {
+            fit_score: {
+              score: processed.scoringMetrics.fit_score.score,
+              confidence: processed.scoringMetrics.fit_score.confidence
+            }
+          };
+        } else if (processed.scoringMetrics.fitScore) {
+          // Convert to fit_score
+          processed.scoringMetrics = {
+            fit_score: {
+              score: processed.scoringMetrics.fitScore.score,
+              confidence: processed.scoringMetrics.fitScore.confidence
+            }
+          };
+        } else if (processed.scoringMetrics.score !== undefined) {
+          // Create nested structure from flat
+          processed.scoringMetrics = {
+            fit_score: {
+              score: processed.scoringMetrics.score,
+              confidence: processed.scoringMetrics.confidence
+            }
+          };
+        }
       }
     }
     

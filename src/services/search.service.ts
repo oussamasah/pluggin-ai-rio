@@ -675,10 +675,23 @@ export class SearchService {
       Model.countDocuments(fixedFilter),
     ]);
     
-    const cleanedDocs = documentCleaner.cleanDocuments(documents, textQuery || '', {
+    // Detect if this is a fit score query by checking the filter
+    const isFitScoreQuery = fixedFilter['scoringMetrics.fit_score.score'] !== undefined ||
+                           (textQuery && /\b(fit\s+score|classify.*fit|top.*fit)\b/i.test(textQuery));
+    
+    // Build query context for cleaner
+    const queryContext = isFitScoreQuery ? 'fit_score_query' : 
+                        (textQuery?.includes('top') && /\d+/.test(textQuery || '')) ? 'top_n_query' :
+                        textQuery || '';
+    
+    const cleanedDocs = documentCleaner.cleanDocuments(documents, queryContext, {
       excludeFields: ['embedding', 'searchKeywords', 'semanticSummary', '__v'],
-      queryIntent: 'search',
-      preserveDocumentCount: textQuery?.includes('top') || false
+      queryIntent: isFitScoreQuery ? 'analyze' : 'search',
+      preserveDocumentCount: isFitScoreQuery || (textQuery?.includes('top') || false),
+      // CRITICAL: For fit score queries, ensure scoringMetrics is preserved
+      priorityFields: isFitScoreQuery ? 
+        ['_id', 'name', 'scoringMetrics', 'scoringMetrics.fit_score', 'scoringMetrics.fit_score.score', 'scoringMetrics.fit_score.confidence', 'industry', 'employeeCount', 'annualRevenue'] :
+        ['_id', 'name', 'score']
     });
     
     return {
