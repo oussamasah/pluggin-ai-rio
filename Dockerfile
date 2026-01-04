@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY package*.json ./
 RUN npm ci --legacy-peer-deps
+RUN npm i --save-dev @types/express @types/cors @types/winston @types/uuid  --legacy-peer-deps
 
 COPY . .
 RUN npm run build
