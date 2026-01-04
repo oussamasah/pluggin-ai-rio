@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  rio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://mongodb:27017/rio
+      - MONGODB_DB_NAME=rio
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - MEM0_API_KEY=${MEM0_API_KEY}
+      - COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
+      - PLANNER_MODEL=anthropic/claude-3.5-sonnet
+      - EXECUTOR_MODEL=anthropic/claude-3.5-haiku
+      - CRITIC_MODEL=anthropic/claude-3.5-sonnet
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - rio-network
+
+  mongodb:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=rio
+    volumes:
+      - mongodb-data:/data/db
+      - mongodb-config:/data/configdb
+    restart: unless-stopped
+    networks:
+      - rio-network
+    command: mongod --bind_ip_all
+
+  # Optional: MongoDB Express for database management
+  mongo-express:
+    image: mongo-express:latest
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+      - ME_CONFIG_MONGODB_PORT=27017
+      - ME_CONFIG_MONGODB_ENABLE_ADMIN=true
+      - ME_CONFIG_BASICAUTH_USERNAME=admin
+      - ME_CONFIG_BASICAUTH_PASSWORD=admin123
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+    networks:
+      - rio-network
+
+volumes:
+  mongodb-data:
+    driver: local
+  mongodb-config:
+    driver: local
+
+networks:
+  rio-network:
+    driver: bridge

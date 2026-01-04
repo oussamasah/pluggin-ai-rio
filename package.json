@@ -1,0 +1,40 @@
+{
+    "name": "rio-orchestrator",
+    "version": "1.0.0",
+    "description": "Relational Intelligence Orchestrator - Advanced RAG System",
+    "main": "dist/index.js",
+    "scripts": {
+        "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "test": "jest",
+        "lint": "eslint src/**/*.ts"
+    },
+    "dependencies": {
+        "@composio/core": "^0.3.3",
+        "@composio/langchain": "^0.3.3",
+        "@langchain/community": "^0.3.36",
+        "@langchain/core": "^1.1.8",
+        "@langchain/langgraph": "^1.0.7",
+        "@langchain/openai": "^1.2.0",
+        "axios": "^1.13.2",
+        "compromise": "^14.14.5",
+        "cors": "^2.8.5",
+        "date-fns": "^4.1.0",
+        "dotenv": "^17.2.3",
+        "express": "^5.2.1",
+        "jaison": "^2.0.2",
+        "jsonrepair": "^3.13.1",
+        "lodash": "^4.17.21",
+        "mem0ai": "^1.0.39",
+        "mongoose": "^9.1.1",
+        "uuid": "^13.0.0",
+        "winston": "^3.19.0",
+        "zod": "^4.3.4"
+    },
+    "devDependencies": {
+        "@types/node": "^25.0.3",
+        "ts-node-dev": "^2.0.0",
+        "typescript": "^5.9.3"
+    }
+}
