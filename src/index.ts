@@ -234,10 +234,12 @@ app.post('/query/stream', async (req: Request, res: Response, next: NextFunction
       }
     );
 
-    // For now, if we have a final answer, send it as chunks
-    // In the future, this will be streamed from the responder node
+    // If streaming was used, chunks were already sent via onChunk callback
+    // Only simulate streaming if no chunks were received (fallback for non-streaming mode)
     if (result.finalAnswer && !accumulatedText) {
-      // Simulate streaming the final answer character by character for better UX
+      // This should rarely happen if streaming is working correctly
+      // But keep as fallback for non-streaming responses
+      logger.warn('No streaming chunks received, using fallback word-by-word streaming');
       const answer = result.finalAnswer;
       const words = answer.split(' ');
       
@@ -247,7 +249,7 @@ app.post('/query/stream', async (req: Request, res: Response, next: NextFunction
         if (!sendEvent('chunk', { text: chunk, accumulated: accumulatedText })) {
           break;
         }
-        // Small delay to simulate real streaming (optional, can be removed)
+        // Small delay to simulate real streaming
         await new Promise(resolve => setTimeout(resolve, 10));
       }
     }

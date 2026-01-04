@@ -1404,9 +1404,22 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
             step.query = { userId: state.userId };
           }
           step.query.isDecisionMaker = true;
+          
+          // CRITICAL: For "all decision makers" queries, remove activeExperienceTitle filter
+          // It's too restrictive and will filter out most decision makers
+          if (requestsAll && step.query.activeExperienceTitle) {
+            delete step.query.activeExperienceTitle;
+            logger.info('Planner: Removed activeExperienceTitle filter for "all decision makers" query', {
+              stepId: step.stepId,
+              action: step.action,
+              reason: 'Too restrictive for "all" queries'
+            });
+          }
+          
           logger.info('Planner: Added isDecisionMaker filter to employee step', {
             stepId: step.stepId,
-            action: step.action
+            action: step.action,
+            hasTitleFilter: !!step.query.activeExperienceTitle
           });
         }
       });

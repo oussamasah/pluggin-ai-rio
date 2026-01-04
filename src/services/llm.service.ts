@@ -204,22 +204,35 @@ export class LLMService {
 
         logger.debug('LLM Streaming Request', { model, messageCount: messages.length });
 
-        const response = await this.client.post('/chat/completions', payload, {
-          responseType: 'stream',
-          timeout: config.execution.llmTimeout,
-        });
+        const response = await withTimeout(
+          this.client.post('/chat/completions', payload, {
+            responseType: 'stream',
+          }),
+          config.execution.llmTimeout,
+          `LLM stream request timeout for ${model}`
+        );
 
         let fullContent = '';
         let modelName = model;
         let usage: any = undefined;
+        let buffer = '';
 
         return new Promise<LLMResponse>((resolve, reject) => {
           response.data.on('data', (chunk: Buffer) => {
-            const lines = chunk.toString().split('\n').filter((line: string) => line.trim() !== '');
+            // Accumulate chunks in buffer (SSE can split across multiple chunks)
+            buffer += chunk.toString();
+            
+            // Process complete lines
+            const lines = buffer.split('\n');
+            // Keep incomplete line in buffer
+            buffer = lines.pop() || '';
             
             for (const line of lines) {
-              if (line.startsWith('data: ')) {
-                const data = line.slice(6);
+              const trimmedLine = line.trim();
+              if (!trimmedLine) continue;
+              
+              if (trimmedLine.startsWith('data: ')) {
+                const data = trimmedLine.slice(6);
                 
                 if (data === '[DONE]') {
                   resolve({
@@ -238,7 +251,7 @@ export class LLMService {
                     const chunkText = delta.content;
                     fullContent += chunkText;
                     
-                    // Call the chunk callback if provided
+                    // Call the chunk callback immediately for real-time streaming
                     if (onChunk) {
                       onChunk(chunkText);
                     }
@@ -257,6 +270,7 @@ export class LLMService {
                   }
                 } catch (e) {
                   // Ignore parse errors for incomplete chunks
+                  logger.debug('Failed to parse SSE chunk', { error: (e as Error).message, data });
                 }
               }
             }

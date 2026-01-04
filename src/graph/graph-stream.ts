@@ -92,22 +92,12 @@ export async function runRIOStream(
     const lastViewedIcpModelIds: string[] = [...mem0Ids.lastViewedIcpModelIds];
     
     // Continue with regular execution but intercept responder
-    // For now, we'll run the graph normally but stream the final response
+    // The responder node will automatically use streaming if callbacks are set
+    onProgress?.('retriever', nodeMessages.retriever, nodeProgress.retriever);
     const result = await runRIO(query, userId, sessionId);
     
-    // Stream the final answer if we have one
-    if (result.finalAnswer && onChunk) {
-      onProgress?.('responder', 'Streaming response...', nodeProgress.responder);
-      
-      // Stream the response word by word for better UX
-      const words = result.finalAnswer.split(' ');
-      for (let i = 0; i < words.length; i++) {
-        const chunk = (i === 0 ? '' : ' ') + words[i];
-        onChunk(chunk);
-        // Small delay for smooth streaming (optional)
-        await new Promise(resolve => setTimeout(resolve, 20));
-      }
-    }
+    // If streaming was used, the chunks were already sent via onChunk callback
+    // No need to simulate streaming here
     
     onProgress?.('complete', 'Response complete', 100);
     

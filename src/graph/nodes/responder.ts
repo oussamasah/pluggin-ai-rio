@@ -6,6 +6,7 @@ import { logger } from '../../core/logger';
 import { GraphState } from '../state';
 import { config } from '../../core/config';
 import { secureLog, maskSensitiveData } from '../../utils/security';
+import { getStreamCallbacks } from '../graph-stream';
 
 export async function responderNode(state: GraphState): Promise<Partial<GraphState>> {
   try {
@@ -57,13 +58,33 @@ export async function responderNode(state: GraphState): Promise<Partial<GraphSta
       state.retrievedData // Pass actual retrieved data for validation
     );
 
-    const response = await llmService.chat([
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: 'Craft the final response.' },
-    ], {
-      model: config.models.planner,
-      temperature: 0.4,
-    });
+    // Check if streaming is enabled (via callbacks)
+    const streamCallbacks = getStreamCallbacks();
+    const useStreaming = !!streamCallbacks?.onChunk;
+
+    // Use streaming if callbacks are available, otherwise use regular chat
+    const response = useStreaming
+      ? await llmService.chatStream(
+          [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: 'Craft the final response.' },
+          ],
+          {
+            model: config.models.planner,
+            temperature: 0.4,
+            onChunk: streamCallbacks.onChunk, // Stream chunks in real-time
+          }
+        )
+      : await llmService.chat(
+          [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: 'Craft the final response.' },
+          ],
+          {
+            model: config.models.planner,
+            temperature: 0.4,
+          }
+        );
 
     await memoryService.extractAndStoreEntities(
       state.userId,
