@@ -227,26 +227,59 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
     const queryLower = state.originalQuery.toLowerCase();
     
     // Detect specific company name in query (e.g., "company Salam", "Salam company", "Salam's decision makers")
+    // Common words to exclude from company name detection
+    const excludedWords = new Set([
+      'the', 'a', 'an', 'this', 'that', 'those', 'these', 'all', 'my', 'our', 'your',
+      'about', 'analysis', 'give', 'me', 'show', 'list', 'get', 'find', 'search',
+      'company', 'companies', 'employee', 'employees', 'decision', 'maker', 'makers',
+      'executive', 'executives', 'manager', 'managers', 'director', 'directors',
+      'profile', 'profiles', 'details', 'information', 'data', 'insights'
+    ]);
+    
     // Pattern: "company [Name]", "[Name] company", "[Name]'s", "of [Name]", "at [Name]", "from [Name]"
+    // Improved patterns to handle multi-word company names and exclude common words
     const companyNamePatterns = [
-      /\bcompany\s+([A-Z][a-zA-Z]+)(?:\s|$|'s|s\s|and|or)/i,  // "company Salam" - stop at space, end, 's, or conjunctions
-      /\b([A-Z][a-zA-Z]+)\s+company\b/i,  // "Salam company"
-      /\b([A-Z][a-zA-Z]+)'s\s+(decision|maker|employee|executive|profile)/i,  // "Salam's decision makers"
-      /\bof\s+([A-Z][a-zA-Z]+)(?:\s|$|'s|s\s|and|or)/i,  // "of Salam" - stop at space, end, 's, or conjunctions
-      /\b(?:at|from|for|working\s+at)\s+([A-Z][a-zA-Z]+)(?:\s|$)/i,  // "at Salam", "from Salam"
+      // "company 3Pillars Companies" or "company Ultimate Solutions" - capture multi-word names
+      /\bcompany\s+([A-Z][a-zA-Z0-9\s&|]+?)(?:\s+(?:company|companies|'s|s\s|and|or|decision|maker|employee|executive|profile|analysis|details|information)|$)/i,
+      // "[Name] company" or "[Name] Companies" - capture multi-word names
+      /\b([A-Z][a-zA-Z0-9\s&|]+?)\s+(?:company|companies)\b/i,
+      // "[Name]'s decision makers" - capture multi-word names
+      /\b([A-Z][a-zA-Z0-9\s&|]+?)'s\s+(decision|maker|employee|executive|profile)/i,
+      // "of [Name]" - but exclude if followed by common words, capture multi-word
+      /\bof\s+([A-Z][a-zA-Z0-9\s&|]+?)(?:\s+(?:company|companies|'s|s\s|and|or|decision|maker|employee|executive|profile|analysis|details|information)|$)/i,
+      // "at [Name]" or "from [Name]" - capture multi-word names
+      /\b(?:at|from|for|working\s+at)\s+([A-Z][a-zA-Z0-9\s&|]+?)(?:\s+(?:company|companies|decision|maker|employee|executive|profile|analysis|details|information)|$)/i,
+      // "analysis about company [Name]" - capture name after "company"
+      /\b(?:analysis|details|information|insights)\s+(?:about|of|for)\s+(?:company|companies)\s+([A-Z][a-zA-Z0-9\s&|]+?)(?:\s|$)/i,
     ];
     
     let detectedCompanyName: string | null = null;
     for (const pattern of companyNamePatterns) {
       const match = state.originalQuery.match(pattern);
       if (match && match[1]) {
-        detectedCompanyName = match[1].trim();
+        let candidateName = match[1].trim();
+        
         // Remove common words that might be captured
-        detectedCompanyName = detectedCompanyName.replace(/\b(the|a|an|this|that|those|these)\b/gi, '').trim();
-        // Stop at common conjunctions and prepositions
-        detectedCompanyName = detectedCompanyName.split(/\s+(and|or|with|in|on|at|to|for|from|of|the|a|an)\s+/i)[0].trim();
-        if (detectedCompanyName.length > 1 && detectedCompanyName.length < 50) { // Reasonable name length
-          break;
+        candidateName = candidateName.replace(/\b(the|a|an|this|that|those|these|all|my|our|your)\b/gi, '').trim();
+        
+        // Split into words and filter out excluded words
+        const words = candidateName.split(/\s+/);
+        const filteredWords = words.filter(word => {
+          const wordLower = word.toLowerCase().replace(/[^a-z0-9]/g, '');
+          return !excludedWords.has(wordLower) && word.length > 0;
+        });
+        
+        if (filteredWords.length > 0) {
+          candidateName = filteredWords.join(' ');
+          
+          // Stop at common conjunctions and prepositions
+          candidateName = candidateName.split(/\s+(and|or|with|in|on|at|to|for|from|of|the|a|an|about|analysis|give|show|list|get|find)\s+/i)[0].trim();
+          
+          // Validate: must be at least 2 characters, not just common words, and reasonable length
+          if (candidateName.length >= 2 && candidateName.length < 50 && !excludedWords.has(candidateName.toLowerCase())) {
+            detectedCompanyName = candidateName;
+            break;
+          }
         }
       }
     }
@@ -1354,9 +1387,47 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
           if (!step.query) {
             step.query = { userId: state.userId };
           }
-          // CRITICAL: Always add name filter, even if _id is present
-          // This ensures we only get the specific company, not all companies
-          step.query.name = { $regex: detectedCompanyName, $options: 'i' };
+          
+          // Check if there's already a name filter that might be wrong
+          if (step.query.name) {
+            const existingNameFilter = step.query.name;
+            // Extract the regex value from existing filter
+            const existingRegex = typeof existingNameFilter === 'object' && existingNameFilter.$regex 
+              ? existingNameFilter.$regex 
+              : (typeof existingNameFilter === 'string' ? existingNameFilter : '');
+            
+            // Check if existing filter is a common word that should be excluded
+            const isExcludedWord = excludedWords.has(existingRegex.toLowerCase());
+            
+            // Check if existing filter matches detected name (case-insensitive)
+            const matchesDetected = existingRegex && 
+              (detectedCompanyName.toLowerCase().includes(existingRegex.toLowerCase()) ||
+               existingRegex.toLowerCase().includes(detectedCompanyName.toLowerCase()));
+            
+            // Always replace if it's an excluded word or doesn't match detected name
+            if (isExcludedWord || !matchesDetected) {
+              logger.warn('Planner: Replacing incorrect company name filter with detected name', {
+                stepId: step.stepId,
+                existingFilter: existingNameFilter,
+                existingRegex: existingRegex,
+                detectedName: detectedCompanyName,
+                isExcludedWord,
+                matchesDetected,
+                query: state.originalQuery
+              });
+              // Replace with correct name
+              step.query.name = { $regex: detectedCompanyName, $options: 'i' };
+            } else {
+              // Existing filter matches, keep it but ensure it's case-insensitive
+              if (typeof step.query.name === 'string') {
+                step.query.name = { $regex: step.query.name, $options: 'i' };
+              }
+            }
+          } else {
+            // No existing name filter, add one
+            step.query.name = { $regex: detectedCompanyName, $options: 'i' };
+          }
+          
           step.limit = step.limit || 10; // Limit to 10 when filtering by specific company name
           
           logger.info('Planner: Added company name filter to step', {
