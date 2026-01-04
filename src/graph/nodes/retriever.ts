@@ -313,66 +313,104 @@ export async function retrieverNode(state: GraphState): Promise<Partial<GraphSta
       }
       
       // Replace company ID placeholder if present (FROM_STEP_1_COMPANY_IDS)
-      if (queryToExecute._id && typeof queryToExecute._id === 'object' && 
+      // Check both _id.$in (for companies collection) and companyId.$in (for other collections)
+      const hasCompanyIdPlaceholderInId = queryToExecute._id && typeof queryToExecute._id === 'object' && 
           queryToExecute._id.$in && 
           Array.isArray(queryToExecute._id.$in) &&
-          queryToExecute._id.$in.some((id: string) => id.includes('FROM_STEP') && id.includes('COMPANY'))) {
-        // Find companies from previous steps
-        const companyData = allRetrievedData.find(d => d.collection === 'companies');
-        if (companyData && companyData.documents.length > 0) {
-          const companyIds = companyData.documents
-            .map((doc: any) => doc._id?.toString())
-            .filter((id: string | undefined): id is string => !!id);
-          
-          if (companyIds.length > 0) {
-            // Replace placeholder in $in array
+          queryToExecute._id.$in.some((id: string) => id.includes('FROM_STEP') && id.includes('COMPANY'));
+      
+      const hasCompanyIdPlaceholderInCompanyId = queryToExecute.companyId && typeof queryToExecute.companyId === 'object' && 
+          queryToExecute.companyId.$in && 
+          Array.isArray(queryToExecute.companyId.$in) &&
+          queryToExecute.companyId.$in.some((id: string) => id.includes('FROM_STEP') && id.includes('COMPANY'));
+      
+      if (hasCompanyIdPlaceholderInId || hasCompanyIdPlaceholderInCompanyId) {
+        // Find companies from previous steps or from dependency step
+        let companyIds: string[] = [];
+        
+        // First, try to get company IDs from the dependency step (more accurate)
+        if (fetchStep.dependencies && fetchStep.dependencies.length > 0) {
+          for (const depStepId of fetchStep.dependencies) {
+            const depStep = state.plan?.steps?.find((s: any) => s.stepId === depStepId);
+            if (depStep && depStep.collection === 'companies') {
+              // Find data from this dependency step
+              const depStepData = allRetrievedData.find((d: any) => 
+                d.stepId === depStepId || (d.collection === 'companies' && d.documents.length > 0)
+              );
+              if (depStepData && depStepData.documents && depStepData.documents.length > 0) {
+                companyIds = depStepData.documents
+                  .map((doc: any) => doc._id?.toString())
+                  .filter((id: string | undefined): id is string => !!id);
+                logger.info('Retriever: Extracted company IDs from dependency step', {
+                  stepId: fetchStep.stepId,
+                  dependencyStepId: depStepId,
+                  companyIdsCount: companyIds.length
+                });
+                break;
+              }
+            }
+          }
+        }
+        
+        // If no company IDs from dependency, try allRetrievedData
+        if (companyIds.length === 0) {
+          const companyData = allRetrievedData.find(d => d.collection === 'companies');
+          if (companyData && companyData.documents.length > 0) {
+            companyIds = companyData.documents
+              .map((doc: any) => doc._id?.toString())
+              .filter((id: string | undefined): id is string => !!id);
+          }
+        }
+        
+        // If still no company IDs, try to get from employees
+        if (companyIds.length === 0) {
+          const employeeData = allRetrievedData.find(d => d.collection === 'employees');
+          if (employeeData && employeeData.documents.length > 0) {
+            companyIds = employeeData.documents
+              .map((doc: any) => doc.companyId?.toString())
+              .filter((id: string | undefined): id is string => !!id && id !== 'undefined');
+          }
+        }
+        
+        if (companyIds.length > 0) {
+          // Replace placeholder in _id.$in (for companies collection)
+          if (hasCompanyIdPlaceholderInId) {
             queryToExecute._id.$in = queryToExecute._id.$in
               .filter((id: string) => !id.includes('FROM_STEP') || !id.includes('COMPANY'))
               .concat(companyIds);
-            logger.info('Retriever: Replaced company ID placeholder', {
+            logger.info('Retriever: Replaced company ID placeholder in _id', {
               stepId: fetchStep.stepId,
               companyIdsCount: companyIds.length,
               collection: fetchStep.collection
             });
-          } else {
-            logger.warn('Retriever: Company ID placeholder found but no company IDs available', {
-              stepId: fetchStep.stepId
+          }
+          
+          // Replace placeholder in companyId.$in (for enrichments, gtm_intelligence, etc.)
+          if (hasCompanyIdPlaceholderInCompanyId) {
+            queryToExecute.companyId.$in = queryToExecute.companyId.$in
+              .filter((id: string) => !id.includes('FROM_STEP') || !id.includes('COMPANY'))
+              .concat(companyIds);
+            logger.info('Retriever: Replaced company ID placeholder in companyId', {
+              stepId: fetchStep.stepId,
+              companyIdsCount: companyIds.length,
+              collection: fetchStep.collection
             });
-            // Remove invalid placeholder
-            delete queryToExecute._id;
           }
         } else {
-          // Also check if we have employees and can extract companyId from them
-          const employeeData = allRetrievedData.find(d => d.collection === 'employees');
-          if (employeeData && employeeData.documents.length > 0) {
-            const companyIds = employeeData.documents
-              .map((doc: any) => doc.companyId?.toString())
-              .filter((id: string | undefined): id is string => !!id && id !== 'undefined');
-            
-            if (companyIds.length > 0) {
-              queryToExecute._id.$in = queryToExecute._id.$in
-                .filter((id: string) => !id.includes('FROM_STEP') || !id.includes('COMPANY'))
-                .concat(companyIds);
-              logger.info('Retriever: Replaced company ID placeholder from employee companyId', {
-                stepId: fetchStep.stepId,
-                companyIdsCount: companyIds.length,
-                collection: fetchStep.collection
-              });
-            } else {
-              logger.warn('Retriever: Company ID placeholder found but no company IDs from employees', {
-                stepId: fetchStep.stepId
-              });
-              delete queryToExecute._id;
-            }
-          } else {
-            logger.warn('Retriever: Company ID placeholder found but no company/employee step executed yet', {
-              stepId: fetchStep.stepId,
-              dependencies: fetchStep.dependencies
-            });
-            // Remove invalid placeholder
+          logger.warn('Retriever: Company ID placeholder found but no company IDs available', {
+            stepId: fetchStep.stepId,
+            hasDependencies: !!(fetchStep.dependencies && fetchStep.dependencies.length > 0),
+            dependencies: fetchStep.dependencies
+          });
+          // Remove invalid placeholder
+          if (hasCompanyIdPlaceholderInId) {
             delete queryToExecute._id;
           }
+          if (hasCompanyIdPlaceholderInCompanyId) {
+            delete queryToExecute.companyId;
+          }
         }
+      }
       }
       
       logger.debug('Retriever: About to execute fetch step', {
