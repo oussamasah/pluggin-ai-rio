@@ -2,8 +2,15 @@ import { llmService } from '../../services/llm.service';
 import { dynamicPromptBuilder } from '../../prompts/dynamic-builder';
 import { logger } from '../../core/logger';
 import { GraphState } from '../state';
+import { getStreamCallbacks } from '../graph-stream';
 
 export async function criticNode(state: GraphState): Promise<Partial<GraphState>> {
+  // Send progress update when node starts
+  const streamCallbacks = getStreamCallbacks();
+  if (streamCallbacks?.onProgress) {
+    streamCallbacks.onProgress('critic', 'Validating analysis...', 75);
+  }
+  
   try {
     logger.info('Critic node executing', {
       analysisLength: state.analysis?.length || 0,

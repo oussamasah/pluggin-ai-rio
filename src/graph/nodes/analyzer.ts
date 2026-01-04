@@ -4,8 +4,14 @@ import { logger } from '../../core/logger';
 import { GraphState } from '../state';
 import { config } from '../../core/config';
 import { secureLog, maskSensitiveData } from '../../utils/security';
+import { getStreamCallbacks } from '../graph-stream';
 
 export async function analyzerNode(state: GraphState): Promise<Partial<GraphState>> {
+  // Send progress update when node starts
+  const streamCallbacks = getStreamCallbacks();
+  if (streamCallbacks?.onProgress) {
+    streamCallbacks.onProgress('analyzer', 'Analyzing data and generating insights...', 60);
+  }
   try {
     // Secure logging - mask sensitive data and IDs
     secureLog({

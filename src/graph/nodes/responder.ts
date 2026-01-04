@@ -9,6 +9,12 @@ import { secureLog, maskSensitiveData } from '../../utils/security';
 import { getStreamCallbacks } from '../graph-stream';
 
 export async function responderNode(state: GraphState): Promise<Partial<GraphState>> {
+  // Send progress update when node starts
+  const streamCallbacks = getStreamCallbacks();
+  if (streamCallbacks?.onProgress) {
+    streamCallbacks.onProgress('responder', 'Crafting your response...', 95);
+  }
+  
   try {
     // Log actual retrieved companies for debugging
     const companies = state.retrievedData.find(r => r.collection === 'companies');
@@ -62,14 +68,10 @@ export async function responderNode(state: GraphState): Promise<Partial<GraphSta
     const streamCallbacks = getStreamCallbacks();
     const useStreaming = !!streamCallbacks?.onChunk;
 
-    // Send progress update when starting to generate response
-    if (useStreaming && streamCallbacks.onProgress) {
-      streamCallbacks.onProgress('responder', 'Generating response...', 90);
-    }
-
     // Use streaming if callbacks are available, otherwise use regular chat
     // IMPORTANT: chatStream() will call onChunk for each chunk as it arrives
-    // The node will still await the full stream, but chunks are sent in real-time
+    // Chunks are sent in real-time via the callback, even though we await the full response
+    let firstChunkReceived = false;
     const response = useStreaming
       ? await llmService.chatStream(
           [
@@ -80,6 +82,16 @@ export async function responderNode(state: GraphState): Promise<Partial<GraphSta
             model: config.models.planner,
             temperature: 0.4,
             onChunk: (chunk: string) => {
+              // Mark that we've started receiving chunks
+              if (!firstChunkReceived) {
+                firstChunkReceived = true;
+                logger.debug('First streaming chunk received', { chunkLength: chunk.length });
+                // Update progress to indicate streaming has started
+                if (streamCallbacks.onProgress) {
+                  streamCallbacks.onProgress('responder', 'Streaming response...', 92);
+                }
+              }
+              
               // Call the chunk callback immediately - this should flush to client
               if (streamCallbacks.onChunk) {
                 streamCallbacks.onChunk(chunk);

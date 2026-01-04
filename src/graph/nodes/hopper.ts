@@ -2,8 +2,15 @@ import { hoppingEngine } from '../../retrieval/hopping-engine';
 import { logger } from '../../core/logger';
 import { GraphState } from '../state';
 import { hybridRetriever } from '../../retrieval/hybrid-retriever';
+import { getStreamCallbacks } from '../graph-stream';
 
 export async function hopperNode(state: GraphState): Promise<Partial<GraphState>> {
+  // Send progress update when node starts
+  const streamCallbacks = getStreamCallbacks();
+  if (streamCallbacks?.onProgress) {
+    streamCallbacks.onProgress('hopper', 'Gathering related information...', 40);
+  }
+  
   try {
     logger.info('Hopper node executing', { userId: state.userId });
 

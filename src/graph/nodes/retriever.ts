@@ -7,7 +7,14 @@ import { updateProgress } from '../../utils/progress-tracker';
 import { executeParallelFetches } from '../../utils/parallel-executor';
 import { config } from '../../core/config';
 
+import { getStreamCallbacks } from '../graph-stream';
+
 export async function retrieverNode(state: GraphState): Promise<Partial<GraphState>> {
+  // Send progress update when node starts
+  const streamCallbacks = getStreamCallbacks();
+  if (streamCallbacks?.onProgress) {
+    streamCallbacks.onProgress('retriever', 'Retrieving data from database...', 30);
+  }
   const nodeStartTime = Date.now();
   
   try {

@@ -6,9 +6,16 @@ import { GraphState } from '../state';
 import { schemaService } from '../../services/schema.service';
 import { checkTotalTimeout, trackNodeExecution } from '../../utils/timeout';
 import { updateProgress } from '../../utils/progress-tracker';
+import { getStreamCallbacks } from '../graph-stream';
 
 export async function plannerNode(state: GraphState): Promise<Partial<GraphState>> {
   const nodeStartTime = Date.now();
+  
+  // Send progress update when node starts
+  const streamCallbacks = getStreamCallbacks();
+  if (streamCallbacks?.onProgress) {
+    streamCallbacks.onProgress('planner', 'Planning your query...', 10);
+  }
   
   try {
     // Check total timeout

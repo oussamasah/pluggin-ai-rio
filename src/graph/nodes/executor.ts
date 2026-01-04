@@ -4,8 +4,15 @@ import { dynamicPromptBuilder } from '../../prompts/dynamic-builder';
 import { logger } from '../../core/logger';
 import { GraphState } from '../state';
 import { RESPONSE_TEMPLATES } from '../../prompts/templates';
+import { getStreamCallbacks } from '../graph-stream';
 
 export async function executorNode(state: GraphState): Promise<Partial<GraphState>> {
+  // Send progress update when node starts
+  const streamCallbacks = getStreamCallbacks();
+  if (streamCallbacks?.onProgress) {
+    streamCallbacks.onProgress('executor', 'Executing actions...', 80);
+  }
+  
   try {
     logger.info('Executor node executing', { 
       actions: state.intent?.actions 

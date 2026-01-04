@@ -183,6 +183,16 @@ app.post('/query/stream', async (req: Request, res: Response, next: NextFunction
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+    
+    // Disable Express response buffering for real-time streaming
+    if (typeof (res as any).flushHeaders === 'function') {
+      (res as any).flushHeaders();
+    }
+    
+    // Ensure no buffering at the socket level
+    if (res.socket && typeof (res.socket as any).setNoDelay === 'function') {
+      (res.socket as any).setNoDelay(true);
+    }
 
     // Helper function to send SSE events with immediate flushing
     const sendEvent = (type: string, data: any) => {
@@ -226,15 +236,17 @@ app.post('/query/stream', async (req: Request, res: Response, next: NextFunction
         onChunk: (chunk) => {
           accumulatedText += chunk;
           // Send chunk immediately - flush is handled in sendEvent
-          sendEvent('chunk', {
+          const sent = sendEvent('chunk', {
             text: chunk,
             accumulated: accumulatedText,
           });
+          
           // Log first few chunks for debugging
-          if (accumulatedText.length < 100) {
-            logger.debug('Streaming chunk received', { 
+          if (accumulatedText.length < 200) {
+            logger.debug('Streaming chunk sent to client', { 
               chunkLength: chunk.length, 
-              accumulatedLength: accumulatedText.length 
+              accumulatedLength: accumulatedText.length,
+              sent
             });
           }
         },

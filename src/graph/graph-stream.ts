@@ -30,6 +30,44 @@ export function getStreamCallbacks(): StreamCallbacks | null {
 }
 
 /**
+ * Wraps a node function to send progress updates before and after execution
+ */
+function wrapNodeWithProgress(
+  nodeName: string,
+  nodeFunction: (state: GraphState) => Promise<Partial<GraphState>>,
+  progressPercentage: number,
+  message: string
+) {
+  return async (state: GraphState): Promise<Partial<GraphState>> => {
+    const callbacks = getStreamCallbacks();
+    
+    // Send progress update when node starts
+    if (callbacks?.onProgress) {
+      callbacks.onProgress(nodeName, message, progressPercentage);
+    }
+    
+    try {
+      // Execute the node
+      const result = await nodeFunction(state);
+      
+      // Send progress update when node completes (slightly higher percentage)
+      if (callbacks?.onProgress) {
+        const completionPercentage = Math.min(100, progressPercentage + 5);
+        callbacks.onProgress(nodeName, `${message} (completed)`, completionPercentage);
+      }
+      
+      return result;
+    } catch (error) {
+      // Send error progress update
+      if (callbacks?.onProgress) {
+        callbacks.onProgress(nodeName, `${message} (error)`, progressPercentage);
+      }
+      throw error;
+    }
+  };
+}
+
+/**
  * Streaming version of runRIO with real-time callbacks
  * This intercepts the graph execution and sends progress updates
  */
@@ -67,33 +105,11 @@ export async function runRIOStream(
       responder: 'Crafting your response...',
     };
 
-    // Intercept node execution by wrapping the graph
-    // For now, we'll use a modified version that sends progress
-    // and streams the responder node's LLM call
+    // Send initial start event
+    onProgress?.('start', 'Starting query processing...', 0);
     
-    onProgress?.('planner', nodeMessages.planner, nodeProgress.planner);
-    
-    // Enhance query
-    const enhancedQuery = queryEnhancer.enhance(query, userId);
-    
-    // Get previous results (same as regular runRIO)
-    const referencesContext = /\b(this|that|the|previous)\s+context\b/i.test(query);
-    const { sessionContextService } = await import('../services/session-context.service');
-    const previousResults = await sessionContextService.getPreviousResults(
-      sessionId || '', 
-      userId, 
-      query,
-      referencesContext
-    );
-    
-    const mem0Ids = await sessionContextService.getLastViewedIds(userId);
-    const lastViewedCompanyIds: string[] = [...mem0Ids.lastViewedCompanyIds];
-    const lastViewedEmployeeIds: string[] = [...mem0Ids.lastViewedEmployeeIds];
-    const lastViewedIcpModelIds: string[] = [...mem0Ids.lastViewedIcpModelIds];
-    
-    // Continue with regular execution but intercept responder
-    // The responder node will automatically use streaming if callbacks are set
-    onProgress?.('retriever', nodeMessages.retriever, nodeProgress.retriever);
+    // Continue with regular execution - nodes will send progress via getStreamCallbacks()
+    // Each node checks for callbacks and sends progress updates when they start
     const result = await runRIO(query, userId, sessionId);
     
     // If streaming was used, the chunks were already sent via onChunk callback
