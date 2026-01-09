@@ -8,6 +8,7 @@ export interface PreviousQueryResult {
   retrievedData: RetrievedData[];
   flattenedData: Record<string, any>[];
   analysis?: string; // Store the analysis text for context
+  finalAnswer?: string; // OPTIMIZATION: Store final answer for conversation history
   summary: {
     companies: number;
     employees: number;
@@ -188,7 +189,8 @@ export class SessionContextService {
     query: string,
     retrievedData: RetrievedData[],
     flattenedData: Record<string, any>[],
-    analysis?: string // Optional: store analysis text for context
+    analysis?: string, // Optional: store analysis text for context
+    finalAnswer?: string // OPTIMIZATION: Store final answer for conversation history
   ): Promise<void> {
     if (!sessionId) {
       return;
@@ -212,22 +214,27 @@ export class SessionContextService {
       flattenedData,
       analysis: analysis ? analysis.substring(0, 2000) : undefined, // Store analysis (truncated to 2000 chars)
       summary,
+      // OPTIMIZATION: Store final answer for conversation history
+      finalAnswer: finalAnswer ? finalAnswer.substring(0, 1000) : undefined,
     };
 
     // Method 1: Store in in-memory cache (fast, session-scoped) - DEFAULT
-    const updated = [newResult, ...existing].slice(0, 5);
+    // OPTIMIZATION: Increase cache size to 10 for better context retention
+    const updated = [newResult, ...existing].slice(0, 10);
     this.sessionCache.set(cacheKey, updated);
 
     logger.debug('Stored query results in session cache (in-memory)', {
       sessionId,
       query: query.substring(0, 50),
       summary,
+      hasAnalysis: !!analysis,
+      hasFinalAnswer: !!finalAnswer,
     });
 
     // Method 2: Optionally store in Mem0 for cross-session persistence
     if (this.useMem0) {
       try {
-        await this.storeInMem0(userId, query, sessionId, summary, retrievedData, flattenedData);
+        await this.storeInMem0(userId, query, sessionId, summary, retrievedData, flattenedData, analysis, finalAnswer);
       } catch (error: any) {
         logger.warn('Failed to store in Mem0, using in-memory only', {
           error: error.message
@@ -315,7 +322,9 @@ export class SessionContextService {
     sessionId: string,
     summary: { companies: number; employees: number; other: number },
     retrievedData: RetrievedData[],
-    flattenedData?: Record<string, any>[]
+    flattenedData?: Record<string, any>[],
+    analysis?: string, // OPTIMIZATION: Store analysis for better context
+    finalAnswer?: string // OPTIMIZATION: Store final answer for conversation history
   ): Promise<void> {
     try {
       // Extract key entities for Mem0 storage
@@ -327,7 +336,10 @@ export class SessionContextService {
       const companyNames = companies.slice(0, 5).map((c: any) => c.name).filter(Boolean).join(', ');
       const employeeNames = employees.slice(0, 5).map((e: any) => e.fullName).filter(Boolean).join(', ');
       
-      const memoryText = `User queried "${query.substring(0, 200)}" and found ${summary.companies} companies${companyNames ? `: ${companyNames}` : ''} and ${summary.employees} employees${employeeNames ? `: ${employeeNames}` : ''}.`;
+      // OPTIMIZATION 6: Enhanced memory text with analysis and answer summary
+      const analysisSummary = analysis ? ` Analysis: ${analysis.substring(0, 150)}...` : '';
+      const answerSummary = finalAnswer ? ` Response: ${finalAnswer.substring(0, 150)}...` : '';
+      const memoryText = `User queried "${query.substring(0, 200)}" and found ${summary.companies} companies${companyNames ? `: ${companyNames}` : ''} and ${summary.employees} employees${employeeNames ? `: ${employeeNames}` : ''}.${analysisSummary}${answerSummary}`;
 
       // Extract IDs for context persistence (limit to prevent metadata size issues)
       const lastViewedCompanyIds = companies
@@ -357,6 +369,9 @@ export class SessionContextService {
         employeesCount: summary.employees,
         otherCount: summary.other,
         timestamp: new Date().toISOString(),
+        // OPTIMIZATION: Store analysis and answer summaries for conversation history
+        analysisSummary: analysis ? analysis.substring(0, 500) : undefined,
+        answerSummary: finalAnswer ? finalAnswer.substring(0, 500) : undefined,
         // Store IDs for context persistence (arrays are fine)
         lastViewedCompanyIds: lastViewedCompanyIds.length > 0 ? lastViewedCompanyIds : undefined,
         lastViewedEmployeeIds: lastViewedEmployeeIds.length > 0 ? lastViewedEmployeeIds : undefined,

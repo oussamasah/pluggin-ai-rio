@@ -24,11 +24,27 @@ export async function executorNode(state: GraphState): Promise<Partial<GraphStat
       };
     }
 
+    // OPTIMIZATION: Extract previous analysis if query references it (e.g., "create email from this analysis")
+    const referencesPreviousAnalysis = /\b(this|that|the|previous)\s+(analysis|report|answer|context)\b/i.test(state.originalQuery || '') ||
+                                       /\b(from|based on|using)\s+(this|that|the|previous)\s+(analysis|report|answer)\b/i.test(state.originalQuery || '');
+    
+    let previousAnalysis: string | undefined;
+    if (referencesPreviousAnalysis && state.previousResults && state.previousResults.length > 0) {
+      // Get the most recent previous result's analysis
+      previousAnalysis = state.previousResults[0]?.analysis;
+      logger.info('Executor: Using previous analysis for context-aware action', {
+        hasPreviousAnalysis: !!previousAnalysis,
+        previousAnalysisLength: previousAnalysis?.length || 0,
+        query: state.originalQuery?.substring(0, 50)
+      });
+    }
+    
     const systemPrompt = dynamicPromptBuilder.buildExecutorPrompt(
       state.query,
       state.analysis || '',
       state.intent,
-      state.retrievedData // Pass retrieved data for CRM actions
+      state.retrievedData, // Pass retrieved data for CRM actions
+      previousAnalysis // OPTIMIZATION: Pass previous analysis for email generation from reports
     );
 
     let actionPlan: any;

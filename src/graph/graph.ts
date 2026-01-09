@@ -264,6 +264,7 @@ export async function runRIO(
     const executionTime = Date.now() - result.startTime;
     
     // Store query results for future reference
+    // OPTIMIZATION: Store both analysis and finalAnswer for complete conversation history
     const { sessionContextService } = await import('../services/session-context.service');
     if (sessionId && result.retrievedData.length > 0) {
       sessionContextService.storeQueryResults(
@@ -272,7 +273,8 @@ export async function runRIO(
         query,
         result.retrievedData,
         result.flattenedData,
-        result.analysis || undefined // Store analysis text for context awareness (convert null to undefined)
+        result.analysis || undefined, // Store analysis text for context awareness
+        result.finalAnswer || undefined // OPTIMIZATION: Store final answer for conversation history
       );
     }
     

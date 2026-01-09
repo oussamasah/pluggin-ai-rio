@@ -17,6 +17,14 @@ export interface FieldDefinition {
   isArray: boolean;
   isRequired: boolean;
   description?: string;
+  // NEW: Dynamic field metadata for intelligent matching
+  synonyms?: string[]; // Alternative names users might use
+  category?: string; // Field category (e.g., 'scoring', 'contact', 'financial')
+  importance?: 'high' | 'medium' | 'low'; // Field importance for analysis
+  searchable?: boolean; // Whether field should be included in semantic search
+  analyzable?: boolean; // Whether field should be included in analysis
+  examples?: string[]; // Example values or queries
+  nestedFields?: string[]; // For nested objects, list of child field paths
 }
 
 export interface Relationship {
@@ -53,17 +61,161 @@ export class SchemaService {
         { name: 'contactEmail', type: 'String', isArray: false, isRequired: false },
         { name: 'contactPhone', type: 'String', isArray: false, isRequired: false },
         { name: 'linkedinUrl', type: 'String', isArray: false, isRequired: false },
-        { name: 'industry', type: 'String', isArray: true, isRequired: false },
-        { name: 'targetMarket', type: 'String', isArray: false, isRequired: false },
-        { name: 'ownershipType', type: 'String', isArray: false, isRequired: false },
-        { name: 'employeeCount', type: 'Number', isArray: false, isRequired: false },
-        { name: 'annualRevenue', type: 'Number', isArray: false, isRequired: false },
-        { name: 'annualRevenueCurrency', type: 'String', isArray: false, isRequired: false },
-        { name: 'fundingStage', type: 'String', isArray: false, isRequired: false },
-        { name: 'technologies', type: 'String', isArray: true, isRequired: false },
-        { name: 'scoringMetrics', type: 'Mixed', isArray: false, isRequired: false },
-        { name: 'scoringMetrics.fit_score.score', type: 'Number', isArray: false, isRequired: false, description: 'Fit score value (nested path)' },
-        { name: 'scoringMetrics.fit_score.confidence', type: 'Number', isArray: false, isRequired: false, description: 'Fit score confidence (nested path)' },
+        { 
+          name: 'industry', 
+          type: 'String', 
+          isArray: true, 
+          isRequired: false,
+          description: 'Industry sectors the company operates in',
+          category: 'classification',
+          importance: 'high',
+          searchable: true,
+          analyzable: true,
+          synonyms: ['sector', 'industries', 'business sector', 'market'],
+          examples: ['technology companies', 'companies in healthcare industry']
+        },
+        { 
+          name: 'targetMarket', 
+          type: 'String', 
+          isArray: false, 
+          isRequired: false,
+          description: 'Target market segment',
+          category: 'classification',
+          importance: 'medium',
+          searchable: true
+        },
+        { 
+          name: 'ownershipType', 
+          type: 'String', 
+          isArray: false, 
+          isRequired: false,
+          description: 'Company ownership structure',
+          category: 'classification',
+          importance: 'low',
+          searchable: true
+        },
+        { 
+          name: 'employeeCount', 
+          type: 'Number', 
+          isArray: false, 
+          isRequired: false,
+          description: 'Number of employees',
+          category: 'financial',
+          importance: 'high',
+          searchable: true,
+          analyzable: true,
+          synonyms: ['employees', 'headcount', 'team size', 'workforce'],
+          examples: ['companies with more than 500 employees', 'large companies']
+        },
+        { 
+          name: 'annualRevenue', 
+          type: 'Number', 
+          isArray: false, 
+          isRequired: false,
+          description: 'Annual revenue in base currency',
+          category: 'financial',
+          importance: 'high',
+          searchable: true,
+          analyzable: true,
+          synonyms: ['revenue', 'annual revenue', 'sales', 'income'],
+          examples: ['companies with revenue over 100M', 'high revenue companies']
+        },
+        { 
+          name: 'annualRevenueCurrency', 
+          type: 'String', 
+          isArray: false, 
+          isRequired: false,
+          description: 'Currency for annual revenue',
+          category: 'financial',
+          importance: 'low'
+        },
+        { 
+          name: 'fundingStage', 
+          type: 'String', 
+          isArray: false, 
+          isRequired: false,
+          description: 'Current funding stage',
+          category: 'financial',
+          importance: 'medium',
+          searchable: true,
+          synonyms: ['funding', 'investment stage', 'capital stage']
+        },
+        { 
+          name: 'technologies', 
+          type: 'String', 
+          isArray: true, 
+          isRequired: false,
+          description: 'Technologies and tools used by the company',
+          category: 'technology',
+          importance: 'high',
+          searchable: true,
+          analyzable: true,
+          synonyms: ['tech stack', 'technology stack', 'tools', 'software', 'platforms'],
+          examples: ['companies using Salesforce', 'Python companies']
+        },
+        { 
+          name: 'scoringMetrics', 
+          type: 'Mixed', 
+          isArray: false, 
+          isRequired: false,
+          description: 'Performance and scoring metrics including fit scores and intent analysis',
+          category: 'scoring',
+          importance: 'high',
+          searchable: true,
+          analyzable: true,
+          nestedFields: [
+            'scoringMetrics.fit_score.score',
+            'scoringMetrics.fit_score.confidence',
+            'scoringMetrics.intent_score',
+            'scoringMetrics.intent_score.analysis_metadata',
+            'scoringMetrics.intent_score.signal_breakdown',
+            'scoringMetrics.intent_score.gtm_intelligence',
+            'scoringMetrics.intent_score.offer_alignment_playbook'
+          ]
+        },
+        { 
+          name: 'scoringMetrics.fit_score.score', 
+          type: 'Number', 
+          isArray: false, 
+          isRequired: false, 
+          description: 'Fit score value indicating ICP alignment (0-100)',
+          category: 'scoring',
+          importance: 'high',
+          synonyms: ['fit score', 'fit_score', 'icp fit', 'fit', 'icp score'],
+          examples: ['top 5 companies by fit score', 'companies with high fit score']
+        },
+        { 
+          name: 'scoringMetrics.fit_score.confidence', 
+          type: 'Number', 
+          isArray: false, 
+          isRequired: false, 
+          description: 'Confidence level for fit score calculation (0-100)',
+          category: 'scoring',
+          importance: 'medium',
+          synonyms: ['fit confidence', 'fit_score confidence']
+        },
+        { 
+          name: 'scoringMetrics.intent_score', 
+          type: 'Mixed', 
+          isArray: false, 
+          isRequired: false, 
+          description: 'Buying intent analysis with signals, GTM intelligence, and recommendations',
+          category: 'scoring',
+          importance: 'high',
+          searchable: true,
+          analyzable: true,
+          synonyms: ['intent score', 'intent_score', 'buying intent', 'intent analysis', 'intent signals', 'buying signals'],
+          examples: ['intent score details', 'buying intent analysis', 'intent signals for company'],
+          nestedFields: [
+            'scoringMetrics.intent_score.analysis_metadata.final_intent_score',
+            'scoringMetrics.intent_score.analysis_metadata.overall_confidence',
+            'scoringMetrics.intent_score.signal_breakdown',
+            'scoringMetrics.intent_score.gtm_intelligence.overall_buying_readiness',
+            'scoringMetrics.intent_score.gtm_intelligence.timing_recommendation',
+            'scoringMetrics.intent_score.gtm_intelligence.messaging_strategy',
+            'scoringMetrics.intent_score.offer_alignment_playbook'
+          ]
+        },
         { name: 'embedding', type: 'Number', isArray: true, isRequired: false },
         { name: 'searchKeywords', type: 'String', isArray: true, isRequired: false },
         { name: 'semanticSummary', type: 'String', isArray: false, isRequired: false },
@@ -258,11 +410,19 @@ export class SchemaService {
     );
 
     if (directPath) {
+      // Map relationship type to HoppingPath cardinality
+      let cardinality: 'one-to-one' | 'one-to-many' | 'many-to-many';
+      if (directPath.type === 'many-to-one') {
+        cardinality = 'one-to-many'; // Reverse the direction
+      } else {
+        cardinality = directPath.type as 'one-to-one' | 'one-to-many' | 'many-to-many';
+      }
+      
       return {
         from,
         to,
         via: directPath.via || directPath.field,
-        cardinality: directPath.type,
+        cardinality,
       };
     }
 
@@ -271,11 +431,19 @@ export class SchemaService {
     );
 
     if (reversePath) {
+      // Map relationship type to HoppingPath cardinality
+      let cardinality: 'one-to-one' | 'one-to-many' | 'many-to-many';
+      if (reversePath.type === 'many-to-one') {
+        cardinality = 'one-to-many'; // Reverse the direction
+      } else {
+        cardinality = reversePath.type as 'one-to-one' | 'one-to-many' | 'many-to-many';
+      }
+      
       return {
         from: to,
         to: from,
         via: reversePath.via || reversePath.field,
-        cardinality: reversePath.type,
+        cardinality,
       };
     }
 

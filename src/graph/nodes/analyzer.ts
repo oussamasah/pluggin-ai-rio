@@ -76,6 +76,24 @@ export async function analyzerNode(state: GraphState): Promise<Partial<GraphStat
     const isAggregation = state.flattenedData[0] && 
       ('count' in state.flattenedData[0] || 'sum' in state.flattenedData[0] || 'avg' in state.flattenedData[0]);
 
+    // Log what data we're about to analyze (for debugging field-specific queries)
+    if (state.originalQuery && /\bintent_score|intent\s+score\b/i.test(state.originalQuery)) {
+      const companies = state.retrievedData.find(r => r.collection === 'companies');
+      if (companies && companies.documents.length > 0) {
+        const firstCompany = companies.documents[0];
+        logger.info('Analyzer: Intent_score query detected - checking data availability', {
+          companyName: firstCompany.name,
+          hasScoringMetrics: !!firstCompany.scoringMetrics,
+          hasIntentScore: !!firstCompany.scoringMetrics?.intent_score,
+          scoringMetricsKeys: firstCompany.scoringMetrics ? Object.keys(firstCompany.scoringMetrics) : [],
+          intentScoreKeys: firstCompany.scoringMetrics?.intent_score ? Object.keys(firstCompany.scoringMetrics.intent_score) : [],
+          hasAnalysisMetadata: !!firstCompany.scoringMetrics?.intent_score?.analysis_metadata,
+          hasSignalBreakdown: !!firstCompany.scoringMetrics?.intent_score?.signal_breakdown,
+          hasGtmIntelligence: !!firstCompany.scoringMetrics?.intent_score?.gtm_intelligence
+        });
+      }
+    }
+    
     // For decision maker queries, we need to pass retrievedData (structured) not flattenedData
     // so the prompt builder can properly count companies vs employees
     const systemPrompt = dynamicPromptBuilder.buildAnalyzerPrompt(
@@ -89,17 +107,58 @@ export async function analyzerNode(state: GraphState): Promise<Partial<GraphStat
     const isDecisionMakerTableQuery = /\b(decision\s+maker|decision\s+makers)\b/i.test(state.originalQuery) &&
                                       /\b(table|in\s+table|as\s+table)\b/i.test(state.originalQuery);
     
-    const userPrompt = isDecisionMakerTableQuery
+    // For intent_score queries, add specific instruction to focus on intent_score data
+    let enhancedUserPrompt = isDecisionMakerTableQuery
       ? 'Create a table of decision makers with columns: Decision Maker Name | Company Name | Industry | Title. Match employees to companies using companyId field.'
       : (isAggregation 
           ? 'Format this aggregated data as a clear table with insights and totals.' 
           : 'Analyze this data and provide insights.');
     
+    // Check if this is an intent_score query and enhance the prompt
+    if (state.originalQuery && /\bintent_score|intent\s+score|buying\s+intent\b/i.test(state.originalQuery)) {
+      const companies = state.retrievedData.find(r => r.collection === 'companies');
+      if (companies && companies.documents.length > 0) {
+        const firstCompany = companies.documents[0];
+        const hasIntentScore = !!firstCompany.scoringMetrics?.intent_score;
+        const hasFitScore = !!firstCompany.scoringMetrics?.fit_score;
+        
+        if (hasIntentScore) {
+          enhancedUserPrompt = `🚨🚨🚨 CRITICAL: User specifically asked for "intent_score" details. You MUST focus EXCLUSIVELY on the scoringMetrics.intent_score data structure. 
+
+DO NOT mention fit_score, fit score, or any other scoring metrics - ONLY intent_score.
+
+Analyze and present ONLY from scoringMetrics.intent_score:
+1. analysis_metadata: final_intent_score, overall_confidence, total_events_detected, timeframe_analyzed
+2. signal_breakdown: Each signal's event_type, signal_name, weight_percentage, raw_score, weighted_contribution, confidence_level, events_detected (with event details)
+3. gtm_intelligence: overall_buying_readiness (readiness_level, stage_in_buyers_journey, estimated_decision_timeline), timing_recommendation, messaging_strategy, stakeholder_targeting, risk_assessment
+4. offer_alignment_playbook: positioning_strategy, key_features_to_emphasize, relevant_use_case, objection_handling
+
+PRIMARY focus must be on intent_score analysis. Include brief company context (name, industry) but DO NOT discuss fit_score or any other metrics.`;
+        } else {
+          // Intent_score data is missing - be very clear about this
+          // CRITICAL: User asked for intent_score, but it doesn't exist. DO NOT mention fit_score.
+          enhancedUserPrompt = `🚨🚨🚨 CRITICAL: User specifically asked for "intent_score" details, but scoringMetrics.intent_score is NOT present in the retrieved data.
+
+ABSOLUTE REQUIREMENT: DO NOT provide fit_score information as a substitute. DO NOT discuss fit_score, fit score, or any scoring metrics at all. The user asked for intent_score specifically, not fit_score.
+
+You MUST:
+1. Start your response by clearly stating: "Intent score data is not available for this company"
+2. Explain what intent_score would contain if it existed (analysis_metadata, signal_breakdown, gtm_intelligence, offer_alignment_playbook)
+3. Suggest that intent_score analysis may need to be generated or calculated
+4. DO NOT mention fit_score, fit score, or any other scoring metrics - the user asked for intent_score specifically
+5. DO NOT provide any analysis of fit_score data even if it exists in the database
+6. Keep your response focused ONLY on the missing intent_score data
+
+Available data shows: ${hasFitScore ? 'fit_score exists in scoringMetrics, but intent_score does NOT exist' : 'no scoring metrics available'}. Your response must focus ONLY on the missing intent_score, NOT on fit_score.`;
+        }
+      }
+    }
+    
     const response = await llmService.chat([
       { role: 'system', content: systemPrompt },
       { 
         role: 'user', 
-        content: userPrompt
+        content: enhancedUserPrompt
       },
     ], {
       model: config.models.planner,

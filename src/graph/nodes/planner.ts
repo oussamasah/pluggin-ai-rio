@@ -284,19 +284,42 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
       }
     }
     
-    // Detect specific employee name in query (e.g., "Francis Dayapan", "employee John")
+    // Detect specific employee name in query (e.g., "Francis Dayapan", "employee John", "Casey Nolte profile")
+    // CRITICAL: Order matters - more specific patterns first
     const employeeNamePatterns = [
-      /\b(employee|executive|manager|director|ceo|cto|cfo|person|profile)\s+([A-Z][a-zA-Z\s]+?)(?:\s|$)/i,  // "employee John Smith"
-      /\b([A-Z][a-zA-Z\s]+?)\s+(profile|analysis|psychology)/i,  // "Francis Dayapan profile"
+      // Pattern 1: "analysis of [Name] profile" or "analysis of [Name] and"
+      /\b(?:analysis|analyze|give\s+analysis)\s+of\s+([A-Z][a-zA-Z\s]+?)(?:\s+(?:profile|and|his|her|their|company|companies))?/i,
+      // Pattern 2: "[Name] profile" or "[Name] analysis" (must be at least 2 words for name)
+      /\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)\s+(?:profile|analysis|psychology|details|information)/i,
+      // Pattern 3: "employee [Name]" or "profile [Name]"
+      /\b(?:employee|executive|manager|director|ceo|cto|cfo|person|profile)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)/i,
+      // Pattern 4: "[Name]'s profile" or "[Name]'s company"
+      /\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)'s\s+(?:profile|company|analysis)/i,
     ];
     
     let detectedEmployeeName: string | null = null;
     for (const pattern of employeeNamePatterns) {
       const match = state.originalQuery.match(pattern);
-      if (match && match[2]) {
-        detectedEmployeeName = match[2].trim();
-        if (detectedEmployeeName.length > 1) {
-          break;
+      if (match && match[1]) {
+        const extractedName = match[1].trim();
+        // Validate: name should be at least 2 characters and contain at least one space (for full name)
+        // OR be a single capitalized word (for first name only)
+        if (extractedName.length >= 2) {
+          // Filter out common words that might be matched incorrectly
+          const commonWords = new Set(['analysis', 'analyze', 'give', 'profile', 'company', 'companies', 'and', 'his', 'her', 'their', 'the', 'of', 'about']);
+          const nameParts = extractedName.split(/\s+/);
+          const validParts = nameParts.filter(part => !commonWords.has(part.toLowerCase()) && part.length > 1);
+          
+          if (validParts.length > 0) {
+            detectedEmployeeName = validParts.join(' ');
+            logger.info('Planner: Detected employee name from query', {
+              pattern: pattern.toString(),
+              extractedName,
+              detectedEmployeeName,
+              query: state.originalQuery
+            });
+            break;
+          }
         }
       }
     }
@@ -314,13 +337,43 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
     const hasEmployeeKeywords = /\b(employee|executive|manager|director|ceo|cto|cfo|staff|person|people|profiles?)\b/i.test(queryLower);
     const shouldHaveHop = hasCompanyName && hasEmployeeKeywords;
     
+    // OPTIMIZATION: Check if LLM already extracted employee name from entities
+    // Trust LLM extraction over regex patterns (check AFTER regex runs, but prefer LLM)
+    const llmExtractedEmployee = response.intent?.entities?.find(
+      (e: any) => e.type === 'employee' && (e.field === 'fullName' || e.collectionHint === 'employees')
+    );
+    
+    if (llmExtractedEmployee && llmExtractedEmployee.value) {
+      const llmEmployeeName = llmExtractedEmployee.value.trim();
+      if (llmEmployeeName.length > 1) {
+        // LLM already extracted it - use that instead of regex
+        const regexFallback = detectedEmployeeName; // Save regex result for logging
+        detectedEmployeeName = llmEmployeeName;
+        logger.info('Planner: Using LLM-extracted employee name (trusting LLM over regex)', {
+          llmExtractedName: llmEmployeeName,
+          regexFallbackName: regexFallback,
+          query: state.originalQuery,
+          entity: llmExtractedEmployee
+        });
+      }
+    } else if (detectedEmployeeName) {
+      // Regex found it but LLM didn't - log warning
+      logger.warn('Planner: LLM did not extract employee name, using regex fallback', {
+        regexExtractedName: detectedEmployeeName,
+        query: state.originalQuery,
+        llmEntities: response.intent?.entities || [],
+        note: 'Consider enhancing LLM prompt if this happens frequently'
+      });
+    }
+    
     logger.info('Planner: Detected specific entities in query', {
       detectedCompanyName,
       detectedEmployeeName,
       requestsAll,
       hasCompanyName,
       hasEmployeeKeywords,
-      query: state.originalQuery
+      query: state.originalQuery,
+      llmExtractedEmployee: llmExtractedEmployee?.value || null
     });
     
     // CRITICAL: If query references "this company", "this profile/employee/person", or "this ICP model", inject IDs FIRST
@@ -357,9 +410,20 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
     // If query has pronoun (he/she/they) asking about company, fetch employee then hop to company
     const askingAboutCompany = /\b(company|companies|industry|industries|organization|firm|business|where|which)\b/i.test(state.originalQuery);
     
-    // If query mentions "email template", "meet", "hook", "schedule" - this is an action/generation query
-    // But it still needs data (ICP model, employee, company) to generate the template
-    const isGenerationQuery = /\b(email\s+template|email|template|meet|meeting|hook|schedule|outreach)\b/i.test(state.originalQuery);
+    // OPTIMIZATION: Use LLM-based context extraction for smarter detection
+    // Instead of hardcoded regex, let the LLM understand user intent from the prompt
+    // The planner prompt now includes instructions for detecting rewrite/edit/explanation queries
+    // We still use regex as a fallback, but the LLM should handle most cases
+    
+    // Fallback regex patterns (LLM should handle this, but we keep for safety)
+    const isRewriteQuery = /\b(rewrite|regenerate|recreate|re-?write|re-?generate|edit|modify|revise|update)\s+(email|template|message|content|text|analysis|report|answer)\b/i.test(state.originalQuery) ||
+                           /\b(rewrite|regenerate|recreate|re-?write|re-?generate|edit|modify|revise)\s+(email\s+\d+|Email\s+\d+)\b/i.test(state.originalQuery);
+    const isEditQuery = /\b(edit|modify|change|update|revise|adjust|improve|enhance)\s+(the|this|that|previous|last)\s+(email|analysis|report|answer|response|table|data|content)\b/i.test(state.originalQuery);
+    const isExplainQuery = /\b(explain|clarify|elaborate|detail|describe|what\s+does|how\s+does|tell\s+me\s+more|more\s+details?|more\s+information)\b/i.test(state.originalQuery);
+    const isExtractQuery = /\b(extract|get|show\s+me|give\s+me|provide)\s+(?:the|that|this|previous|from\s+the)\s+(?:data|information|details?|names?|scores?|results?)\b/i.test(state.originalQuery);
+    
+    const isGenerationQuery = /\b(email\s+template|email|template|meet|meeting|hook|schedule|outreach)\b/i.test(state.originalQuery) || 
+                              isRewriteQuery || isEditQuery;
     
     // Detect analysis queries that need intelligence data (psychology analysis, profile analysis, etc.)
     const isAnalysisQuery = /\b(analysis|analyze|psychology|profile\s+analysis|persona|intelligence|insights|recommendation|recommend|suggest|how\s+to|strategy|strategies)\b/i.test(state.originalQuery) ||
@@ -368,13 +432,17 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
     const needsIntelligenceData = isGenerationQuery || isAnalysisQuery;
     
     // Detect action queries: "send to crm", "create contact", "add to crm", "sync to crm"
+    // CRITICAL: Rewrite/edit/explain queries are NOT action queries - they're generation/analysis queries
     // Also handle "thosecompanies" (no space) as "those companies"
     const normalizedQuery = state.originalQuery.replace(/\bthosecompanies\b/gi, 'those companies');
-    const isActionQuery = /\b(send|add|create|sync|update|push|export)\s+(to|in|into)\s+(crm|salesforce|hubspot|slack|gmail|jira)\b/i.test(normalizedQuery) ||
-                         /\b(send|add|create|sync|update|push|export)\s+(those|these|previous|last|the)\s+(compan(?:y|ies)|contacts?|leads?)\s+(to|in|into)\s+(crm|salesforce|hubspot)\b/i.test(normalizedQuery);
+    const isActionQuery = !isRewriteQuery && !isEditQuery && !isExplainQuery && ( // EXCLUDE content modification queries
+                         /\b(send|add|create|sync|update|push|export)\s+(to|in|into)\s+(crm|salesforce|hubspot|slack|gmail|jira)\b/i.test(normalizedQuery) ||
+                         /\b(send|add|create|sync|update|push|export)\s+(those|these|previous|last|the)\s+(compan(?:y|ies)|contacts?|leads?)\s+(to|in|into)\s+(crm|salesforce|hubspot)\b/i.test(normalizedQuery)
+                         );
     
     // CRITICAL: Handle action queries FIRST - they need to execute, not analyze
-    if (isActionQuery) {
+    // BUT: Rewrite/edit/explain queries should go through analyzer first to get context
+    if (isActionQuery && !isRewriteQuery && !isEditQuery && !isExplainQuery) {
       logger.info('Planner: Action query detected - preparing execution plan', {
         query: state.originalQuery,
         hasCompanyIds: availableCompanyIds.length > 0,
@@ -1382,7 +1450,33 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
           s.collection === 'companies'
         );
         
+        // Check if detected name is actually a field name (e.g., "competitors", "revenue", etc.)
+        const fieldNames = new Set(['competitors', 'competitor', 'revenue', 'employees', 'employee', 
+          'industry', 'technologies', 'technology', 'location', 'locations', 'headquarters', 
+          'description', 'summary', 'details', 'information', 'data', 'metrics', 'scores']);
+        const isFieldName = fieldNames.has(detectedCompanyName.toLowerCase());
+        
         companySteps.forEach((step: any) => {
+          // CRITICAL: Don't add name filter if:
+          // 1. We already have an ID filter (ID is more specific and accurate)
+          // 2. The detected name is actually a field name (e.g., "competitors")
+          // 3. The query is asking for a field of "this company" (e.g., "competitors of this company")
+          const hasIdFilter = !!step.query?._id;
+          const isFieldQuery = isFieldName || 
+            /\b(competitors?|revenue|employees?|industry|technologies?|location|details?|information|data|metrics?|scores?)\s+of\s+(this|that|the)\s+company\b/i.test(state.originalQuery || '');
+          
+          if (hasIdFilter || isFieldQuery) {
+            logger.info('Planner: Skipping company name filter', {
+              stepId: step.stepId,
+              reason: hasIdFilter ? 'ID filter already present (more specific)' : 'Field query detected',
+              detectedName: detectedCompanyName,
+              isFieldName,
+              hasIdFilter,
+              query: state.originalQuery
+            });
+            return; // Skip adding name filter
+          }
+          
           // Add company name filter to the query
           if (!step.query) {
             step.query = { userId: state.userId };
@@ -1475,7 +1569,16 @@ export async function plannerNode(state: GraphState): Promise<Partial<GraphState
           // If query already has _id filter (from previous results), keep it but also add name filter
           // Otherwise, replace with name filter
           if (!step.query._id) {
-            step.query.fullName = { $regex: detectedEmployeeName, $options: 'i' };
+            // CRITICAL: Escape special regex characters in the name for safe matching
+            const escapedName = detectedEmployeeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            // Use regex to match the full name (case-insensitive)
+            step.query.fullName = { $regex: escapedName, $options: 'i' };
+            logger.info('Planner: Added employee name filter with regex', {
+              stepId: step.stepId,
+              employeeName: detectedEmployeeName,
+              escapedName,
+              regex: step.query.fullName
+            });
           } else {
             // If _id is present, we're using previous results - don't override
             logger.info('Planner: Employee step already has _id filter, keeping it', {

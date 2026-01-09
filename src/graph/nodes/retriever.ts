@@ -450,6 +450,7 @@ export async function retrieverNode(state: GraphState): Promise<Partial<GraphSta
       });
       
       // Execute with timeout
+      // CRITICAL: Pass originalQuery to allow context-aware field detection (e.g., intent_score_query)
       const stepData = await withTimeout(
         hybridRetriever.retrieveWithPlan(
           queryToExecute,
@@ -458,7 +459,8 @@ export async function retrieverNode(state: GraphState): Promise<Partial<GraphSta
           {
             limit: fetchStep.limit || 20,
             sort: fetchStep.sort,
-            includeRelated: false
+            includeRelated: false,
+            originalQuery: state.originalQuery // Pass original query for field context detection
           }
         ),
         config.execution.dbTimeout,
@@ -546,6 +548,18 @@ export async function retrieverNode(state: GraphState): Promise<Partial<GraphSta
                                 !['fetch', 'hop', 'aggregate'].includes(a)
                               );
     
+    // Update progress (calculate before early returns)
+    const progressUpdate = updateProgress({
+      ...state,
+      currentNode: 'retriever',
+      progress: state.progress || {
+        currentNode: 'retriever',
+        completedNodes: ['planner'],
+        progressPercentage: 30,
+        estimatedTimeRemaining: undefined
+      }
+    });
+    
     if (isExecuteIntent || hasExternalActions) {
       logger.info('Retriever: Action query detected - routing to executor (skipping analyzer)', {
         intentType: state.intent?.type,
@@ -569,18 +583,6 @@ export async function retrieverNode(state: GraphState): Promise<Partial<GraphSta
     const nextNode = hopSteps.length > 0
       ? 'hopper'
       : 'analyzer';
-
-    // Update progress
-    const progressUpdate = updateProgress({
-      ...state,
-      currentNode: 'retriever',
-      progress: state.progress || {
-        currentNode: 'retriever',
-        completedNodes: ['planner'],
-        progressPercentage: 0,
-        lastUpdate: Date.now()
-      }
-    });
     
     return {
       retrievedData: allRetrievedData,

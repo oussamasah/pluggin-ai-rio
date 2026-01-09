@@ -1,6 +1,7 @@
 import { GraphState, MemoryContext } from '../types/graph';
 import { SYSTEM_PROMPTS } from './system-prompts';
 import { schemaService } from '../services/schema.service';
+import { logger } from '../core/logger';
 
 export class DynamicPromptBuilder {
   buildPlannerPrompt(
@@ -19,18 +20,42 @@ export class DynamicPromptBuilder {
   ): string {
     let prompt = SYSTEM_PROMPTS.PLANNER;
 
+    // OPTIMIZATION 7: Enhanced memory context in prompts
     if (memory.facts.length > 0) {
-      prompt += '\n\nRELEVANT MEMORY:\n';
+      prompt += '\n\n=== RELEVANT MEMORY (User Context) ===\n';
       memory.facts.slice(0, 5).forEach(fact => {
-        prompt += `- ${fact.content}\n`;
+        prompt += `- ${fact.content} (confidence: ${(fact.confidence * 100).toFixed(0)}%)\n`;
       });
     }
 
     if (Object.keys(memory.entities).length > 0) {
-      prompt += '\n\nKNOWN ENTITIES:\n';
+      prompt += '\n\n=== KNOWN ENTITIES ===\n';
       Object.entries(memory.entities).forEach(([type, values]) => {
-        prompt += `- ${type}: ${JSON.stringify(values)}\n`;
+        const valuesList = Array.isArray(values) ? values : [values];
+        const uniqueValues = valuesList
+          .map((v: any) => typeof v === 'object' ? v.value : v)
+          .filter((v: any, idx: number, arr: any[]) => arr.indexOf(v) === idx)
+          .slice(0, 5);
+        prompt += `- ${type}: ${uniqueValues.join(', ')}\n`;
       });
+    }
+
+    // OPTIMIZATION 8: Include user preferences and personal info
+    if (Object.keys(memory.preferences).length > 0) {
+      prompt += '\n\n=== USER PREFERENCES & PERSONAL INFO ===\n';
+      Object.entries(memory.preferences).forEach(([key, value]) => {
+        prompt += `- ${key}: ${value}\n`;
+      });
+      prompt += '\nIMPORTANT: Use this information to personalize responses. For example, if user_name is stored, use it in greetings.\n';
+    }
+
+    // OPTIMIZATION 9: Include conversation history for context
+    if (memory.conversationHistory && memory.conversationHistory.length > 0) {
+      prompt += '\n\n=== RECENT CONVERSATION HISTORY ===\n';
+      memory.conversationHistory.slice(0, 5).forEach((turn, idx) => {
+        prompt += `${idx + 1}. ${turn.role}: "${turn.content.substring(0, 150)}${turn.content.length > 150 ? '...' : ''}"\n`;
+      });
+      prompt += '\nUse this history to understand the conversation flow and provide context-aware responses.\n';
     }
 
     // Add previous query results context
@@ -42,9 +67,15 @@ export class DynamicPromptBuilder {
         prompt += `Previous Query ${idx + 1}: "${result.query}"\n`;
         prompt += `Summary: ${result.summary.companies} companies, ${result.summary.employees} employees\n`;
         
-        // Include analysis if available (for "previous answer" or "the analysis" references)
+        // OPTIMIZATION 10: Enhanced analysis context for better reuse
         if (result.analysis) {
-          prompt += `Analysis Preview: ${result.analysis.substring(0, 300)}...\n`;
+          prompt += `Analysis Preview: ${result.analysis.substring(0, 500)}...\n`;
+          prompt += `Analysis Length: ${result.analysis.length} characters\n`;
+          // Extract key insights from analysis
+          const insights = result.analysis.match(/(?:##|###|Key|Finding|Insight|Summary)[^\n]+/gi);
+          if (insights && insights.length > 0) {
+            prompt += `Key Insights: ${insights.slice(0, 3).join('; ')}\n`;
+          }
         }
         
         // Extract key entities from previous results
@@ -74,6 +105,17 @@ export class DynamicPromptBuilder {
       prompt += 'IMPORTANT: If the user says "this ceo", "that company", "the employee", "previous results", "previous answer", "the analysis", "those results", etc.,\n';
       prompt += 'they are referring to the entities and data listed above. Use the IDs from previous results in your query filters.\n';
       prompt += 'If user asks about "previous answer" or "the analysis", use the analysis preview above to understand what was discussed.\n';
+      prompt += '\n=== CRITICAL: EMPLOYEE NAME DETECTION ===\n';
+      prompt += 'When the user mentions a specific person\'s name (e.g., "Casey Nolte", "Francis Dayapan", "John Smith"),\n';
+      prompt += 'you MUST:\n';
+      prompt += '1. Extract the full name from the query\n';
+      prompt += '2. Add it to the employee query as: {"fullName": {"$regex": "Extracted Name", "$options": "i"}}\n';
+      prompt += '3. Use "fullName" field (NOT "name" - employees use "fullName")\n';
+      prompt += '4. If query also mentions company, you may need to fetch employee first, then hop to company\n';
+      prompt += 'Examples:\n';
+      prompt += '  - "analysis of Casey Nolte profile" → Extract "Casey Nolte", add {"fullName": {"$regex": "Casey Nolte", "$options": "i"}}\n';
+      prompt += '  - "give analysis of John Smith and his company" → Extract "John Smith", fetch employee, then hop to company\n';
+      prompt += '  - "Francis Dayapan profile" → Extract "Francis Dayapan", add {"fullName": {"$regex": "Francis Dayapan", "$options": "i"}}\n';
     }
 
     if (queryContext) {
@@ -118,12 +160,52 @@ export class DynamicPromptBuilder {
     prompt += `\n\nQUERY INTENT: ${intent}`;
     prompt += `\n\nIS AGGREGATION: ${isAggregation}`;
     
+    // DYNAMIC FIELD MATCHING: Use field matcher to detect relevant fields
+    let fieldDescriptions = '';
+    let isIntentScoreQuery = false;
+    let isFitScoreQuery = false;
+    let queryContext = 'general_query';
+    
+    try {
+      const { getFieldMatcher } = require('../services/field-matcher.service');
+      const { schemaService } = require('../services/schema.service');
+      const fieldMatcher = getFieldMatcher(schemaService);
+      
+      const matches = fieldMatcher.matchQueryToFields(query, ['companies', 'employees']);
+      if (matches.length > 0 && matches[0].matchedFields.length > 0) {
+        // Get field descriptions for prompt
+        fieldDescriptions = fieldMatcher.getFieldDescriptionsForPrompt(
+          matches[0].collection,
+          matches[0].matchedFields
+        );
+        
+        // Determine query context
+        queryContext = matches[0].queryContext;
+        isIntentScoreQuery = queryContext === 'intent_score_query';
+        isFitScoreQuery = queryContext === 'fit_score_query';
+        
+        logger.debug('Dynamic field matching completed', {
+          collection: matches[0].collection,
+          matchedFieldsCount: matches[0].matchedFields.length,
+          queryContext,
+          topFields: matches[0].matchedFields.slice(0, 3).map(m => m.field.name)
+        });
+      }
+    } catch (error) {
+      // Fallback to pattern matching
+      logger.debug('Field matcher not available, using fallback pattern matching', { error: (error as Error).message });
+      isFitScoreQuery = /\b(fit\s+score|sorted\s+by\s+fit|fit\s+sorted)\b/i.test(query);
+      isIntentScoreQuery = /\b(intent\s+score|intent_score|buying\s+intent|intent\s+analysis|intent\s+signals|details.*intent|about.*intent)\b/i.test(query);
+    }
+    
+    // Add field descriptions to prompt if available
+    if (fieldDescriptions) {
+      prompt += fieldDescriptions;
+    }
+    
     // Extract "top N" from query to enforce limit
     const topNMatch = query.match(/\b(top|find|get|show)\s+(\d+)\b/i);
     const requestedCount = topNMatch ? parseInt(topNMatch[2], 10) : null;
-    
-    // Check if this is a fit score query
-    const isFitScoreQuery = /\b(fit\s+score|sorted\s+by\s+fit|fit\s+sorted)\b/i.test(query);
     
     // Check if this is a decision maker query
     const isDecisionMakerQuery = /\b(decision\s+maker|decision\s+makers|executive|executives|ceo|cto|cfo|manager|director)\b/i.test(query);
@@ -150,6 +232,24 @@ export class DynamicPromptBuilder {
       prompt += `\n| Decision Maker Name | Company Name | Industry | Title |`;
       prompt += `\n|-------------------|--------------|----------|-------|`;
       prompt += `\n| John Doe | Acme Corp | Technology | CEO |`;
+    }
+    
+    if (isIntentScoreQuery) {
+      prompt += `\n\n🚨🚨🚨 INTENT SCORE QUERY - CRITICAL FOCUS REQUIREMENTS 🚨🚨🚨`;
+      prompt += `\n- User specifically asked for "intent_score" details - you MUST focus EXCLUSIVELY on scoringMetrics.intent_score data`;
+      prompt += `\n- DO NOT mention fit_score, fit score, or any other scoring metrics - ONLY intent_score`;
+      prompt += `\n- DO NOT provide fit_score information as a substitute for missing intent_score data`;
+      prompt += `\n- If intent_score data is missing: Clearly state it's not available and DO NOT discuss fit_score`;
+      prompt += `\n- If intent_score data exists: Analyze and present the following intent_score components:`;
+      prompt += `\n  1. analysis_metadata: final_intent_score, overall_confidence, total_events_detected, timeframe_analyzed`;
+      prompt += `\n  2. signal_breakdown: Each signal's event_type, signal_name, weight_percentage, raw_score, weighted_contribution, confidence_level, events_detected`;
+      prompt += `\n  3. gtm_intelligence: overall_buying_readiness (readiness_level, stage_in_buyers_journey, estimated_decision_timeline), timing_recommendation, messaging_strategy, stakeholder_targeting, risk_assessment`;
+      prompt += `\n  4. offer_alignment_playbook: positioning_strategy, key_features_to_emphasize, relevant_use_case, objection_handling`;
+      prompt += `\n- Present intent signals in a structured format (tables or sections)`;
+      prompt += `\n- Include specific event details from signal_breakdown[].events_detected.events[]`;
+      prompt += `\n- Provide actionable insights from gtm_intelligence recommendations`;
+      prompt += `\n- If intent_score data is missing: State clearly that intent_score is not available and explain what it would contain. DO NOT mention fit_score.`;
+      prompt += `\n- You can include brief company context (name, industry) but the PRIMARY focus must be on intent_score analysis ONLY`;
     }
     
     if (isFitScoreQuery) {
@@ -251,12 +351,26 @@ export class DynamicPromptBuilder {
     query: string,
     analysis: string,
     intent: any,
-    retrievedData?: any[]
+    retrievedData?: any[],
+    previousAnalysis?: string // OPTIMIZATION: Pass previous analysis for email generation from reports
   ): string {
     let prompt = SYSTEM_PROMPTS.EXECUTOR;
 
     prompt += `\n\nUSER QUERY: "${query}"`;
-    prompt += `\n\nANALYSIS: ${analysis}`;
+    
+    // OPTIMIZATION: Use previous analysis if query references it (e.g., "create email from this analysis")
+    const referencesPreviousAnalysis = /\b(this|that|the|previous)\s+(analysis|report|answer|context)\b/i.test(query) ||
+                                       /\b(from|based on|using)\s+(this|that|the|previous)\s+(analysis|report|answer)\b/i.test(query);
+    
+    if (referencesPreviousAnalysis && previousAnalysis) {
+      prompt += `\n\n⚠️⚠️⚠️ CRITICAL: User is requesting action based on PREVIOUS ANALYSIS/REPORT ⚠️⚠️⚠️`;
+      prompt += `\nThe user wants to use the following previous analysis/report for this action:\n\n`;
+      prompt += `PREVIOUS ANALYSIS:\n${previousAnalysis.substring(0, 2000)}\n\n`;
+      prompt += `\nYou MUST use this previous analysis as the primary context for generating the requested output (e.g., email sequence).\n`;
+      prompt += `The current analysis below is from the current query, but the user wants output based on the PREVIOUS analysis above.\n\n`;
+    }
+    
+    prompt += `\n\nCURRENT ANALYSIS: ${analysis}`;
     prompt += `\n\nREQUIRED ACTIONS: ${JSON.stringify(intent.actions)}`;
     
     // Include retrieved data for CRM actions
@@ -843,9 +957,134 @@ buildResponderPrompt(
   query: string,
   analysis: string,
   executedActions: any[],
-  retrievedData?: any[]
+  retrievedData?: any[],
+  memory?: MemoryContext,
+  previousResults?: Array<{
+    query: string;
+    timestamp: Date;
+    retrievedData: any[];
+    flattenedData: Record<string, any>[];
+    analysis?: string;
+    finalAnswer?: string; // OPTIMIZATION: Include finalAnswer for rewrite queries
+    summary: { companies: number; employees: number; other: number };
+  }>,
+  previousEmailContent?: string, // OPTIMIZATION: Previous email content for rewrite queries
+  senderName?: string // OPTIMIZATION: Sender name for email signature replacement
 ): string {
   let prompt = SYSTEM_PROMPTS.RESPONDER;
+
+  // OPTIMIZATION 14: Include memory context for personalized responses
+  if (memory) {
+    if (memory.preferences && Object.keys(memory.preferences).length > 0) {
+      prompt += '\n\n=== USER CONTEXT ===\n';
+      if (memory.preferences.user_name) {
+        prompt += `User's name: ${memory.preferences.user_name}\n`;
+        prompt += 'IMPORTANT: Use the user\'s name naturally in your response when appropriate.\n';
+      }
+      if (memory.preferences.user_company) {
+        prompt += `User's company: ${memory.preferences.user_company}\n`;
+      }
+      if (memory.preferences.user_role) {
+        prompt += `User's role: ${memory.preferences.user_role}\n`;
+      }
+      Object.entries(memory.preferences).forEach(([key, value]) => {
+        if (!['user_name', 'user_company', 'user_role'].includes(key)) {
+          prompt += `${key}: ${value}\n`;
+        }
+      });
+    }
+
+    if (memory.conversationHistory && memory.conversationHistory.length > 0) {
+      prompt += '\n\n=== CONVERSATION CONTEXT ===\n';
+      prompt += 'Recent conversation turns:\n';
+      memory.conversationHistory.slice(0, 3).forEach((turn, idx) => {
+        prompt += `${idx + 1}. ${turn.role}: "${turn.content.substring(0, 100)}"\n`;
+      });
+    }
+  }
+
+  // OPTIMIZATION 15: Include previous analysis when generating emails from reports
+  if (previousResults && previousResults.length > 0) {
+    const referencesPrevious = /\b(?:previous|last|earlier|that|this)\s+(?:analysis|answer|report|result|context)\b/i.test(query);
+    if (referencesPrevious && previousResults[0].analysis) {
+      prompt += '\n\n=== PREVIOUS ANALYSIS CONTEXT ===\n';
+      prompt += `From query: "${previousResults[0].query}"\n`;
+      prompt += `Analysis: ${previousResults[0].analysis.substring(0, 800)}...\n`;
+      prompt += 'IMPORTANT: Use this previous analysis as context when generating emails or responses.\n';
+    }
+  }
+  
+  // OPTIMIZATION 16: Handle content modification queries dynamically
+  // This handles rewrite, edit, explain, extract queries based on extracted context
+  if (previousEmailContent) {
+    const isRewrite = /\b(rewrite|regenerate|recreate|re-?write|re-?generate)\b/i.test(query);
+    const isEdit = /\b(edit|modify|change|update|revise|adjust|improve|enhance)\b/i.test(query);
+    const isExplain = /\b(explain|clarify|elaborate|detail|describe|what\s+does|how\s+does)\b/i.test(query);
+    const isExtract = /\b(extract|get|show\s+me|give\s+me|provide)\s+(?:the|that|this|previous)\b/i.test(query);
+    
+    if (isRewrite || isEdit) {
+      prompt += '\n\n⚠️⚠️⚠️ CONTENT MODIFICATION QUERY DETECTED ⚠️⚠️⚠️\n';
+      prompt += `The user wants to ${isRewrite ? 'REWRITE' : 'EDIT/MODIFY'} previous content. Here is the original:\n\n`;
+      prompt += '=== ORIGINAL CONTENT ===\n';
+      prompt += `${previousEmailContent}\n\n`;
+      prompt += '=== MODIFICATION INSTRUCTIONS ===\n';
+      prompt += `User Query: "${query}"\n\n`;
+      prompt += 'CRITICAL REQUIREMENTS:\n';
+      prompt += '1. Modify the content based on the user\'s specific instructions\n';
+      prompt += '2. Keep the same structure and format as the original (unless user requests format change)\n';
+      prompt += '3. If user says "only without extra analysis or data", provide ONLY the modified content, no explanations\n';
+      prompt += '4. Maintain the same tone and style as the original\n';
+      prompt += '5. Apply user-specified changes (e.g., "make it shorter", "add more details", "change the tone")\n';
+      prompt += '6. DO NOT include analysis, data, or extra context unless explicitly requested\n';
+      prompt += '7. If user asks to modify a specific section (e.g., "Email 1"), modify ONLY that section\n';
+      prompt += '\n🚨🚨🚨 CRITICAL: SENDER vs RECIPIENT NAME DISTINCTION 🚨🚨🚨\n';
+      prompt += 'When user says "set my name" or "use my name" or mentions a name in the signature:\n';
+      prompt += '- "my name" = SENDER NAME (the person writing the email) - replace "[Your Name]" placeholder\n';
+      prompt += '- "target name" / "recipient name" = RECIPIENT NAME (the person receiving the email) - DO NOT change this\n';
+      prompt += '- If user says "not to change the name of the target profile", preserve the recipient\'s name\n';
+      prompt += '- Examples:\n';
+      prompt += '  * "set my name oussama sahraoui" → Replace "[Your Name]" with "Oussama Sahraoui" in signature\n';
+      prompt += '  * "best, oussama sahraoui" → Change signature to "Best, Oussama Sahraoui"\n';
+      prompt += '  * "not to change the name of the target profile" → Keep recipient name (Casey Nolte) unchanged\n';
+      prompt += '- Placeholders like "[Your Name]", "[Name]", "Best, [Your Name]" should be replaced with user\'s name\n';
+      prompt += '- Recipient names (in "Hi [Name]" or "Subject: [Name]") should NOT be changed unless explicitly requested\n';
+      
+      // If sender name is provided, explicitly instruct to use it
+      if (senderName) {
+        prompt += `\n🎯 SENDER NAME PROVIDED: "${senderName}"\n`;
+        prompt += `- Replace ALL instances of "[Your Name]", "[Name]", "Best, [Your Name]" with "${senderName}"\n`;
+        prompt += `- Use "${senderName}" in the email signature (e.g., "Best, ${senderName}")\n`;
+        prompt += `- DO NOT change the recipient's name (the person the email is TO)\n`;
+        prompt += `- DO NOT change names in the email body (e.g., "Hi Casey" should stay "Hi Casey")\n`;
+      }
+      prompt += '\n';
+    } else if (isExplain) {
+      prompt += '\n\n⚠️⚠️⚠️ EXPLANATION QUERY DETECTED ⚠️⚠️⚠️\n';
+      prompt += 'The user wants MORE DETAILS or EXPLANATION about previous content:\n\n';
+      prompt += '=== PREVIOUS CONTENT ===\n';
+      prompt += `${previousEmailContent.substring(0, 1500)}\n\n`;
+      prompt += '=== USER REQUEST ===\n';
+      prompt += `"${query}"\n\n`;
+      prompt += 'CRITICAL REQUIREMENTS:\n';
+      prompt += '1. Provide detailed explanation or elaboration based on the user\'s request\n';
+      prompt += '2. Use the previous content as context for your explanation\n';
+      prompt += '3. If user asks "what does this mean", explain the key concepts and implications\n';
+      prompt += '4. If user asks "tell me more", provide additional relevant details\n';
+      prompt += '5. Be thorough but concise - focus on what the user is asking about\n\n';
+    } else if (isExtract) {
+      prompt += '\n\n⚠️⚠️⚠️ DATA EXTRACTION QUERY DETECTED ⚠️⚠️⚠️\n';
+      prompt += 'The user wants to EXTRACT specific data from previous results:\n\n';
+      prompt += '=== PREVIOUS CONTENT ===\n';
+      prompt += `${previousEmailContent.substring(0, 1000)}\n\n`;
+      prompt += '=== EXTRACTION REQUEST ===\n';
+      prompt += `"${query}"\n\n`;
+      prompt += 'CRITICAL REQUIREMENTS:\n';
+      prompt += '1. Extract ONLY the data the user is asking for\n';
+      prompt += '2. Format it clearly (table, list, or structured format)\n';
+      prompt += '3. If user asks for specific fields (e.g., "company names", "fit scores"), extract those fields\n';
+      prompt += '4. Do not include extra analysis or explanations unless requested\n\n';
+    }
+  }
 
   // Detect what user actually wants as output
   const outputReq = this.detectOutputRequirement(query);

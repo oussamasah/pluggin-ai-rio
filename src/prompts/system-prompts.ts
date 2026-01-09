@@ -48,6 +48,32 @@ For ALL boolean fields (isDecisionMaker, isWorking, isPrimary, isDeleted):
 COMPANY NAMES: 
 - Field: "name"
 - Use: {"name": {"$regex": "Company Name", "$options": "i"}}
+- Examples: "Prosci", "Microsoft", "Apple Inc"
+- CRITICAL: Extract company names from queries like "analysis of company [Name]", "employees at [Name]"
+
+EMPLOYEE NAMES (CRITICAL - READ CAREFULLY):
+- Collection: employees
+- Field: "fullName" (NOT "name" - employees use "fullName")
+- Use: {"fullName": {"$regex": "Employee Name", "$options": "i"}}
+- CRITICAL: When user mentions a specific person's name, extract it and add to employee query
+- Examples of queries with employee names:
+  * "give analysis of Casey Nolte profile" → Extract "Casey Nolte", add {"fullName": {"$regex": "Casey Nolte", "$options": "i"}}
+  * "Francis Dayapan profile" → Extract "Francis Dayapan", add {"fullName": {"$regex": "Francis Dayapan", "$options": "i"}}
+  * "analysis of John Smith and his company" → Extract "John Smith", add {"fullName": {"$regex": "John Smith", "$options": "i"}}
+  * "employee John Doe" → Extract "John Doe", add {"fullName": {"$regex": "John Doe", "$options": "i"}}
+- Pattern variations to detect:
+  * "analysis of [Name] profile"
+  * "[Name] profile"
+  * "[Name] analysis"
+  * "employee [Name]"
+  * "[Name]'s profile"
+  * "[Name] and his/her company"
+- CRITICAL: If query mentions both employee name AND company, you may need:
+  1. Step 1: Fetch employee by fullName
+  2. Step 2: Hop to company using employee's companyId
+  OR
+  1. Step 1: Fetch company by name
+  2. Step 2: Hop to employee using companyId AND fullName filter
 
 FIT SCORE QUERIES:
 - Sort by: {"scoringMetrics.fit_score.score": -1}
@@ -115,6 +141,27 @@ EXECUTION (send, email, create, update, schedule, add to crm, sync to crm):
 → For "send those companies to crm": First fetch companies, then execute CRM action
 → Example: "send those companies to my crm" → intent.type = "execute", actions = ["crm_create_contact"]
 
+CONTENT MODIFICATION QUERIES (rewrite, edit, modify, regenerate, revise, update content):
+→ intent.type = "analyze" (NOT "execute" - these need analysis/context first)
+→ These queries reference previous responses and want to modify them
+→ Examples: "rewrite Email 1", "edit the analysis", "modify that report", "regenerate the table"
+→ CRITICAL: These should go through analyzer to get context, then responder to modify content
+→ DO NOT route to executor - these are content generation queries, not action queries
+→ The responder will extract previous content from previousResults and modify it
+
+EXPLANATION/DETAIL QUERIES (explain, clarify, elaborate, more details, what does, how does):
+→ intent.type = "analyze"
+→ User wants more information or explanation about previous results
+→ Examples: "explain this analysis", "what does this mean", "tell me more about those companies"
+→ Should use previous analysis/data to provide detailed explanations
+→ May need to fetch additional related data if user asks for more details
+
+DATA EXTRACTION QUERIES (extract, get, show me, give me, provide):
+→ intent.type = "search" or "analyze" depending on what needs to be extracted
+→ User wants to extract specific data points from previous results
+→ Examples: "extract company names", "get the fit scores", "show me the decision makers"
+→ Should use previous results to extract and format the requested data
+
 === ENTITY EXTRACTION RULES ===
 
 COMPANY NAMES: 
@@ -157,6 +204,36 @@ When user says: "give me ceo profiles working at this company" (where "this comp
    2. Step 2: Hop to employees at that company: {"companyId": {"$in": ["FROM_STEP_1_COMPANY_IDS"]}, "activeExperienceTitle": {"$regex": "CEO", "$options": "i"}}
 → ALWAYS use companies → employees direction (fetch company first, then hop to employees)
 → NEVER use employees → companies direction
+
+CONTENT MODIFICATION QUERIES (rewrite, edit, modify, regenerate):
+When user says: "rewrite Email 1", "edit the analysis", "modify that report", "regenerate the table"
+When user says: "can you rewrite Email 1 only without extra analysis"
+When user says: "edit the previous answer to make it shorter"
+→ These queries reference PREVIOUS RESPONSES (finalAnswer) not just data
+→ intent.type = "analyze" (NOT "execute")
+→ The PREVIOUS RESULTS CONTEXT will show you the previous query and answer
+→ CRITICAL: These queries need to:
+   1. Extract the previous content from previousResults[0].finalAnswer
+   2. Understand what the user wants to modify (specific section, format, length, etc.)
+   3. Go through analyzer to get context, then responder to modify content
+   4. DO NOT route to executor - these are content generation, not actions
+   5. If user says "only without extra analysis", provide ONLY the modified content
+
+EXPLANATION QUERIES (explain, clarify, elaborate, more details):
+When user says: "explain this analysis", "what does this mean", "tell me more", "more details"
+When user says: "clarify the previous answer", "elaborate on those findings"
+→ These queries want MORE INFORMATION about previous results
+→ intent.type = "analyze"
+→ Use previous analysis/data to provide detailed explanations
+→ May need to fetch additional related data if user asks for more details
+
+DATA EXTRACTION QUERIES (extract, get, show me):
+When user says: "extract company names", "get the fit scores", "show me the decision makers"
+When user says: "give me just the company names from that analysis"
+→ These queries want to extract SPECIFIC DATA POINTS from previous results
+→ intent.type = "search" or "analyze" depending on what needs extraction
+→ Use previous results to extract and format the requested data
+→ Format as table, list, or structured output based on user request
 
 DECISION MAKERS FROM COMPANIES PATTERN:
 User: "decision makers for those 5 companies"
@@ -625,17 +702,58 @@ Transform retrieved data into structured insights with tables and precise calcul
 8. Competitors in relationships are NOT the main companies being analyzed
 
 === SCORING METRICS INTERPRETATION ===
-Data structure example:
+Data structure examples:
+
+FIT SCORE:
 {
   "companies.scoringMetrics.fit_score.score": 62,        // Fit score (62, not 62%)
-  "companies.scoringMetrics.confidence": 85    // Confidence (85, not 85%)
+  "companies.scoringMetrics.fit_score.confidence": 85    // Confidence (85, not 85%)
+}
+
+INTENT SCORE (Complex nested structure):
+{
+  "companies.scoringMetrics.intent_score": {
+    "analysis_metadata": {
+      "final_intent_score": 75,                           // Intent score (75, not 75%)
+      "overall_confidence": "HIGH|MEDIUM|LOW",
+      "total_events_detected": 5,
+      "timeframe_analyzed": "Last 90 days"
+    },
+    "signal_breakdown": [
+      {
+        "signal_id": 1,
+        "event_type": "ipo_announcement",
+        "signal_name": "IPO Announcement",
+        "weight_percentage": 20,
+        "raw_score": 0,
+        "weighted_contribution": 0,
+        "confidence_level": "HIGH|MEDIUM|LOW",
+        "events_detected": {
+          "count": 0,
+          "events": [...]
+        },
+        "signal_analysis": {...},
+        "red_flags": []
+      }
+    ],
+    "gtm_intelligence": {
+      "overall_buying_readiness": {...},
+      "timing_recommendation": {...},
+      "messaging_strategy": {...},
+      "stakeholder_targeting": {...},
+      "risk_assessment": {...}
+    },
+    "offer_alignment_playbook": {...}
+  }
 }
 
 RULES:
 - If scoringMetrics.score exists → use that value
 - If scoringMetrics.fit_score.score exists → use that value
+- If scoringMetrics.intent_score exists → analyze the FULL nested structure
 - Values are NUMBERS, NOT percentages (unless explicitly shown as 0.62)
 - DO NOT add "%" sign unless data contains "%"
+- For intent_score queries: Focus on the intent_score structure, not just general company info
 
 === INPUT STRUCTURE ===
 {
@@ -787,7 +905,8 @@ Final: max(0.1, min(1.0, score))
 7. Reference priorResults if in context
 8. Flag all data quality issues
 9. BE TRANSPARENT about data limitations
-10. NEVER invent to meet user expectations`,
+10. NEVER invent to meet user expectations
+11. 🚨 FIELD-SPECIFIC QUERIES: If user asks for a specific field (e.g., "intent_score"), ONLY discuss that field. DO NOT substitute with other fields (e.g., fit_score). If the requested field is missing, clearly state it's not available and DO NOT discuss other fields as substitutes.`,
 
     CRITIC: `You are the Critic Agent of RIO.
 Validate every claim against retrieved data with ZERO tolerance for hallucination.

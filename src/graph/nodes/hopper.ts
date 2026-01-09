@@ -185,7 +185,8 @@ export async function hopperNode(state: GraphState): Promise<Partial<GraphState>
             {
               limit: step.limit || companyIds.length,
               sort: step.sort,
-              includeRelated: false
+              includeRelated: false,
+              originalQuery: state.originalQuery
             }
           );
           
@@ -253,7 +254,8 @@ export async function hopperNode(state: GraphState): Promise<Partial<GraphState>
             {
               limit: step.limit || employeeIds.length,
               sort: step.sort,
-              includeRelated: false
+              includeRelated: false,
+              originalQuery: state.originalQuery
             }
           );
           
@@ -321,7 +323,8 @@ export async function hopperNode(state: GraphState): Promise<Partial<GraphState>
             {
               limit: step.limit || employeeIds.length,
               sort: step.sort,
-              includeRelated: false
+              includeRelated: false,
+              originalQuery: state.originalQuery
             }
           );
           
@@ -393,7 +396,8 @@ export async function hopperNode(state: GraphState): Promise<Partial<GraphState>
               {
                 limit: step.limit || 50,
                 sort: step.sort,
-                includeRelated: false
+                includeRelated: false,
+                originalQuery: state.originalQuery
               }
             );
             
@@ -495,7 +499,8 @@ export async function hopperNode(state: GraphState): Promise<Partial<GraphState>
           {
             limit: effectiveLimit,
             sort: step.sort,
-            includeRelated: false
+            includeRelated: false,
+            originalQuery: state.originalQuery
           }
         );
 

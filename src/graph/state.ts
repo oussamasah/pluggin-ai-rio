@@ -28,6 +28,7 @@ export const GraphStateAnnotation = Annotation.Root({
     retrievedData: RetrievedData[];
     flattenedData: Record<string, any>[];
     analysis?: string;
+    finalAnswer?: string; // OPTIMIZATION: Store final answer for conversation history and rewrite queries
     summary: { companies: number; employees: number; other: number };
   }>>,
   lastViewedCompanyIds: Annotation<string[]>,

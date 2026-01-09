@@ -134,11 +134,81 @@ Provide a helpful, concise response about your mission and how you can help the 
       };
     }
 
+    // OPTIMIZATION: Use context extractor service for smarter content extraction
+    // This handles rewrite, edit, explain, extract queries dynamically
+    const { contextExtractorService } = await import('../../services/context-extractor.service');
+    const extractedContext = await contextExtractorService.extractContext(
+      state.originalQuery || state.query,
+      state.previousResults || []
+    );
+    
+    let previousEmailContent: string | undefined;
+    let extractedData: any = {};
+    let senderName: string | undefined;
+    
+    if (extractedContext) {
+      previousEmailContent = extractedContext.targetContent;
+      extractedData = extractedContext.referencedData || {};
+      
+      // Extract sender name from requirements (e.g., "sender_name:Oussama Sahraoui")
+      const requirements = extractedContext.requirements || [];
+      const senderNameReq = requirements.find((r: string) => r.startsWith('sender_name:'));
+      if (senderNameReq) {
+        senderName = senderNameReq.replace('sender_name:', '');
+        logger.info('Responder: Extracted sender name from requirements', {
+          senderName,
+          query: state.originalQuery
+        });
+      }
+      
+      // Also check memory for user's name if not found in requirements
+      if (!senderName && state.memory?.preferences?.user_name) {
+        senderName = state.memory.preferences.user_name as string;
+        logger.info('Responder: Using sender name from memory', { senderName });
+      }
+      
+      logger.info('Responder: Context extracted from previous results', {
+        type: extractedContext.type,
+        hasTargetContent: !!extractedContext.targetContent,
+        targetSection: extractedContext.targetSection,
+        requirements: extractedContext.requirements,
+        hasReferencedData: !!extractedContext.referencedData,
+        senderName
+      });
+    } else {
+      // Fallback: Simple extraction for rewrite queries
+      const isRewriteQuery = /\b(rewrite|regenerate|recreate|re-?write|re-?generate|edit|modify|revise|update)\s+(email|template|message|content|text)\b/i.test(state.originalQuery || '') ||
+                             /\b(rewrite|regenerate|recreate|re-?write|re-?generate|edit|modify|revise)\s+(email\s+\d+|Email\s+\d+)\b/i.test(state.originalQuery || '');
+      
+      if (isRewriteQuery && state.previousResults && state.previousResults.length > 0) {
+        const previousAnswer = state.previousResults[0]?.finalAnswer || '';
+        if (previousAnswer) {
+          const emailNumberMatch = state.originalQuery?.match(/\b(?:email|Email)\s+(\d+)/i);
+          if (emailNumberMatch) {
+            const emailNum = parseInt(emailNumberMatch[1], 10);
+            const emailPattern = new RegExp(`(?:##|###|Email\\s+${emailNum}|Email\\s+${emailNum}:)[^#]*(?=##|###|Email\\s+${emailNum + 1}|$)`, 'is');
+            const emailMatch = previousAnswer.match(emailPattern);
+            if (emailMatch) {
+              previousEmailContent = emailMatch[0];
+            }
+          }
+          if (!previousEmailContent) {
+            previousEmailContent = previousAnswer.substring(0, 2000);
+          }
+        }
+      }
+    }
+    
+    // OPTIMIZATION 13: Include memory context in responder for personalized responses
     const systemPrompt = dynamicPromptBuilder.buildResponderPrompt(
       state.query,
       state.analysis,
       state.executedActions,
-      state.retrievedData // Pass actual retrieved data for validation
+      state.retrievedData, // Pass actual retrieved data for validation
+      state.memory, // Pass memory context for personalization
+      state.previousResults, // Pass previous results for context-aware responses
+      previousEmailContent, // OPTIMIZATION: Pass previous email content for rewrite queries
+      senderName // OPTIMIZATION: Pass sender name for email signature replacement
     );
 
     // Use streaming if callbacks are available, otherwise use regular chat
@@ -191,6 +261,25 @@ Provide a helpful, concise response about your mission and how you can help the 
         employees: state.retrievedData.find(r => r.collection === 'employees')?.documents || [],
       }
     );
+    
+    // OPTIMIZATION: Store final answer in memory for conversation history
+    if (response.content && response.content.length > 0) {
+      try {
+        await memoryService.addMemory(
+          state.userId,
+          `Assistant response: ${response.content.substring(0, 500)}`,
+          {
+            query: state.originalQuery || state.query,
+            timestamp: new Date().toISOString(),
+            type: 'session_response',
+            answerSummary: response.content.substring(0, 1000),
+          }
+        );
+      } catch (error: any) {
+        logger.debug('Failed to store answer in memory', { error: error.message });
+        // Don't fail the response if memory storage fails
+      }
+    }
 
     logger.info('Response generated', { 
       length: response.content.length,

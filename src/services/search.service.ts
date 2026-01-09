@@ -102,8 +102,28 @@ export class SearchService {
         hasTextQuery: !!query.textQuery
       });
 
+      // CRITICAL: If we have specific filters (beyond just userId), use metadata search
+      // This happens when planner generates a query with specific field filters
+      // textQuery is still passed for context detection (e.g., intent_score_query) but not for search
+      const hasSpecificFilters = Object.keys(enhancedFilter).some(key => 
+        key !== 'userId' && 
+        enhancedFilter[key] !== undefined && 
+        enhancedFilter[key] !== null
+      );
+      
       if (query.sort && Object.keys(query.sort).length > 0) {
         logger.info('Performing sorted metadata search', { sort: query.sort });
+        return await this.metadataSearch({ ...query, filter: enhancedFilter });
+      }
+      
+      // If we have specific filters from planner, use metadata search (even if textQuery exists)
+      // textQuery is used for context detection, not for search
+      if (hasSpecificFilters) {
+        logger.debug('Using metadata search due to specific filters', {
+          filterKeys: Object.keys(enhancedFilter),
+          hasTextQuery: !!query.textQuery,
+          textQueryPurpose: 'context_detection_only'
+        });
         return await this.metadataSearch({ ...query, filter: enhancedFilter });
       }
       
@@ -675,23 +695,87 @@ export class SearchService {
       Model.countDocuments(fixedFilter),
     ]);
     
-    // Detect if this is a fit score query by checking the filter
-    const isFitScoreQuery = fixedFilter['scoringMetrics.fit_score.score'] !== undefined ||
-                           (textQuery && /\b(fit\s+score|classify.*fit|top.*fit)\b/i.test(textQuery));
+    // DEBUG: Log raw data for intent_score queries to verify data exists before cleaning
+    if (textQuery && /\bintent_score|intent\s+score|buying\s+intent\b/i.test(textQuery) && documents.length > 0) {
+      const firstDoc = documents[0];
+      logger.info('SearchService: Raw data check before cleaning', {
+        collection,
+        hasScoringMetrics: !!firstDoc.scoringMetrics,
+        scoringMetricsType: typeof firstDoc.scoringMetrics,
+        scoringMetricsKeys: firstDoc.scoringMetrics ? Object.keys(firstDoc.scoringMetrics) : [],
+        hasIntentScore: !!firstDoc.scoringMetrics?.intent_score,
+        intentScoreType: typeof firstDoc.scoringMetrics?.intent_score,
+        intentScoreKeys: firstDoc.scoringMetrics?.intent_score ? Object.keys(firstDoc.scoringMetrics.intent_score) : [],
+        intentScoreSample: firstDoc.scoringMetrics?.intent_score ? 
+          JSON.stringify(firstDoc.scoringMetrics.intent_score).substring(0, 200) : 'none'
+      });
+    }
     
-    // Build query context for cleaner
-    const queryContext = isFitScoreQuery ? 'fit_score_query' : 
-                        (textQuery?.includes('top') && /\d+/.test(textQuery || '')) ? 'top_n_query' :
-                        textQuery || '';
+    // DYNAMIC FIELD DETECTION: Use field matcher to detect relevant fields
+    let queryContext = textQuery || '';
+    let priorityFields: string[] = ['_id', 'name'];
+    let isFitScoreQuery = false;
+    let isIntentScoreQuery = false;
+    
+    try {
+      const { getFieldMatcher } = require('../services/field-matcher.service');
+      const { schemaService } = require('../services/schema.service');
+      const fieldMatcher = getFieldMatcher(schemaService);
+      
+      if (textQuery) {
+        const matches = fieldMatcher.matchQueryToFields(textQuery, [collection]);
+        if (matches.length > 0 && matches[0].matchedFields.length > 0) {
+          queryContext = matches[0].queryContext;
+          priorityFields = fieldMatcher.getFieldsToPreserve(collection, queryContext);
+          
+          isIntentScoreQuery = queryContext === 'intent_score_query';
+          isFitScoreQuery = queryContext === 'fit_score_query';
+          
+          logger.info('Dynamic field detection in search service', {
+            collection,
+            queryContext,
+            priorityFieldsCount: priorityFields.length,
+            topFields: priorityFields.slice(0, 5),
+            matchedFieldsCount: matches[0].matchedFields.length,
+            topMatchedField: matches[0].matchedFields[0]?.field.name,
+            topMatchedScore: matches[0].matchedFields[0]?.relevanceScore
+          });
+        } else {
+          logger.debug('Dynamic field detection: No matches found', {
+            collection,
+            textQuery: textQuery.substring(0, 100)
+          });
+        }
+      }
+      
+      // Also check filter for field hints
+      if (fixedFilter['scoringMetrics.fit_score.score'] !== undefined) {
+        isFitScoreQuery = true;
+        queryContext = 'fit_score_query';
+      } else if (fixedFilter['scoringMetrics.intent_score'] !== undefined ||
+                 fixedFilter['scoringMetrics.intent_score.analysis_metadata.final_intent_score'] !== undefined) {
+        isIntentScoreQuery = true;
+        queryContext = 'intent_score_query';
+      }
+    } catch (error) {
+      // Fallback to pattern matching
+      logger.debug('Field matcher not available in search service, using fallback', { error: (error as Error).message });
+      isFitScoreQuery = fixedFilter['scoringMetrics.fit_score.score'] !== undefined ||
+                       (textQuery && /\b(fit\s+score|classify.*fit|top.*fit)\b/i.test(textQuery));
+      isIntentScoreQuery = fixedFilter['scoringMetrics.intent_score'] !== undefined ||
+                          (textQuery && /\b(intent\s+score|intent_score|buying\s+intent|intent\s+analysis|intent\s+signals)\b/i.test(textQuery));
+      
+      queryContext = isIntentScoreQuery ? 'intent_score_query' :
+                     isFitScoreQuery ? 'fit_score_query' : 
+                     (textQuery?.includes('top') && /\d+/.test(textQuery || '')) ? 'top_n_query' :
+                     textQuery || '';
+    }
     
     const cleanedDocs = documentCleaner.cleanDocuments(documents, queryContext, {
       excludeFields: ['embedding', 'searchKeywords', 'semanticSummary', '__v'],
-      queryIntent: isFitScoreQuery ? 'analyze' : 'search',
-      preserveDocumentCount: isFitScoreQuery || (textQuery?.includes('top') || false),
-      // CRITICAL: For fit score queries, ensure scoringMetrics is preserved
-      priorityFields: isFitScoreQuery ? 
-        ['_id', 'name', 'scoringMetrics', 'scoringMetrics.fit_score', 'scoringMetrics.fit_score.score', 'scoringMetrics.fit_score.confidence', 'industry', 'employeeCount', 'annualRevenue'] :
-        ['_id', 'name', 'score']
+      queryIntent: (isFitScoreQuery || isIntentScoreQuery) ? 'analyze' : 'search',
+      preserveDocumentCount: isFitScoreQuery || isIntentScoreQuery || (textQuery?.includes('top') || false),
+      priorityFields: priorityFields
     });
     
     return {

@@ -47,12 +47,32 @@ export class DocumentCleaner {
     // Deep clone to avoid mutating original
     let cleaned = JSON.parse(JSON.stringify(document));
     
+    // DEBUG: Log before cleaning for intent_score queries
+    if (queryContext === 'intent_score_query' && document && typeof document === 'object') {
+      logger.debug('DocumentCleaner: Before cleaning - intent_score query', {
+        hasScoringMetrics: !!document.scoringMetrics,
+        hasIntentScore: !!document.scoringMetrics?.intent_score,
+        scoringMetricsKeys: document.scoringMetrics ? Object.keys(document.scoringMetrics) : [],
+        intentScoreKeys: document.scoringMetrics?.intent_score ? Object.keys(document.scoringMetrics.intent_score) : []
+      });
+    }
+    
     // Apply cleaning steps
     cleaned = this.removeExcludedFields(cleaned, contextAwareExclusions);
     cleaned = this.removeEmptyFields(cleaned, opts.removeEmptyFields);
     cleaned = this.truncateStrings(cleaned, opts.maxStringLength);
     cleaned = this.limitArrays(cleaned, opts.maxArrayItems);
     cleaned = this.compressNestedObjects(cleaned, queryContext, opts);
+    
+    // DEBUG: Log after cleaning for intent_score queries
+    if (queryContext === 'intent_score_query' && cleaned && typeof cleaned === 'object') {
+      logger.debug('DocumentCleaner: After cleaning - intent_score query', {
+        hasScoringMetrics: !!cleaned.scoringMetrics,
+        hasIntentScore: !!cleaned.scoringMetrics?.intent_score,
+        scoringMetricsKeys: cleaned.scoringMetrics ? Object.keys(cleaned.scoringMetrics) : [],
+        intentScoreKeys: cleaned.scoringMetrics?.intent_score ? Object.keys(cleaned.scoringMetrics.intent_score) : []
+      });
+    }
     
     // Apply field selection if specified
     if (opts.includeFields.length > 0) {
@@ -229,12 +249,35 @@ export class DocumentCleaner {
 
   /**
    * Extract context from query to optimize cleaning
+   * Now uses dynamic field matching instead of hardcoded patterns
    */
   private extractQueryContext(query: string, intent?: string): string {
-    const queryLower = query.toLowerCase();
+    // Try dynamic field matching first
+    try {
+      const { getFieldMatcher } = require('../services/field-matcher.service');
+      const { schemaService } = require('../services/schema.service');
+      const fieldMatcher = getFieldMatcher(schemaService);
+      
+      const matches = fieldMatcher.matchQueryToFields(query, ['companies', 'employees']);
+      if (matches.length > 0 && matches[0].matchedFields.length > 0) {
+        // Use the query context determined by field matcher
+        const context = matches[0].queryContext;
+        if (context !== 'general_query') {
+          return context;
+        }
+      }
+    } catch (error) {
+      // Fallback to pattern matching if field matcher not available
+      logger.debug('Field matcher not available, using fallback pattern matching', { error: (error as Error).message });
+    }
     
-    // Detect specific query types
-    if (queryLower.includes('industry') || queryLower.includes('sector')) {
+    // Fallback: Pattern-based detection (for backward compatibility)
+    const queryLower = query.toLowerCase();
+    if (queryLower.includes('intent') && queryLower.includes('score')) {
+      return 'intent_score_query';
+    } else if (queryLower.includes('fit') && queryLower.includes('score')) {
+      return 'fit_score_query';
+    } else if (queryLower.includes('industry') || queryLower.includes('sector')) {
       return 'industry_query';
     } else if (queryLower.includes('revenue') || queryLower.includes('financial')) {
       return 'revenue_query';
@@ -244,8 +287,6 @@ export class DocumentCleaner {
       return 'technology_query';
     } else if (queryLower.includes('competitor') || queryLower.includes('competition')) {
       return 'competitor_query';
-    } else if (queryLower.includes('fit') && queryLower.includes('score')) {
-      return 'fit_score_query';
     } else if (queryLower.includes('top') && /\d+/.test(queryLower)) {
       return 'top_n_query';
     } else if (intent === 'search') {
@@ -257,8 +298,34 @@ export class DocumentCleaner {
 
   /**
    * Get optimization options based on query context
+   * Now dynamically determines fields to preserve based on schema
    */
-  private getOptimizationOptions(context: string): Partial<CleanerOptions> {
+  private getOptimizationOptions(context: string, query?: string): Partial<CleanerOptions> {
+    // Try to get fields dynamically from schema
+    let dynamicFields: string[] = [];
+    let dynamicPriorityFields: string[] = [];
+    
+    try {
+      const { getFieldMatcher } = require('../services/field-matcher.service');
+      const { schemaService } = require('../services/schema.service');
+      const fieldMatcher = getFieldMatcher(schemaService);
+      
+      if (query) {
+        const matches = fieldMatcher.matchQueryToFields(query, ['companies', 'employees']);
+        if (matches.length > 0) {
+          dynamicFields = fieldMatcher.getFieldsToPreserve(matches[0].collection, context);
+          dynamicPriorityFields = matches[0].matchedFields
+            .filter(m => m.relevanceScore > 0.5)
+            .map(m => m.field.name);
+        }
+      } else {
+        // Fallback: get fields for context
+        dynamicFields = fieldMatcher.getFieldsToPreserve('companies', context);
+      }
+    } catch (error) {
+      logger.debug('Could not get dynamic fields, using fallback', { error: (error as Error).message });
+    }
+
     const options: Record<string, Partial<CleanerOptions>> = {
       industry_query: {
         includeFields: ['name', 'industry', 'description'],
@@ -385,13 +452,16 @@ export class DocumentCleaner {
     const cleaned: any = {};
     
     Object.entries(doc).forEach(([key, value]) => {
-      // CRITICAL: Always preserve scoringMetrics - it might have nested fit_score data
+      // CRITICAL: Always preserve scoringMetrics - it might have nested fit_score OR intent_score data
       if (key === 'scoringMetrics' && value && typeof value === 'object') {
-        // Check if scoringMetrics has any nested data (fit_score.score, fitScore.score, etc.)
-        const hasNestedData = (value.fit_score && (value.fit_score.score !== undefined || value.fit_score.confidence !== undefined)) ||
-                             (value.fitScore && (value.fitScore.score !== undefined || value.fitScore.confidence !== undefined)) ||
-                             (value.score !== undefined || value.confidence !== undefined);
-        if (hasNestedData) {
+        // Check if scoringMetrics has any nested data (fit_score, intent_score, etc.)
+        const hasFitScore = (value.fit_score && (value.fit_score.score !== undefined || value.fit_score.confidence !== undefined)) ||
+                           (value.fitScore && (value.fitScore.score !== undefined || value.fitScore.confidence !== undefined));
+        const hasIntentScore = value.intent_score && typeof value.intent_score === 'object' && 
+                              Object.keys(value.intent_score).length > 0;
+        const hasOtherScore = (value.score !== undefined || value.confidence !== undefined);
+        
+        if (hasFitScore || hasIntentScore || hasOtherScore) {
           cleaned[key] = value; // Preserve it
           return;
         }
@@ -476,11 +546,51 @@ export class DocumentCleaner {
     
     const processed: any = { ...doc };
     
-    // Special handling for scoring metrics in fit score queries
+    // Special handling for scoring metrics in fit score and intent score queries
     // CRITICAL: Preserve the scoringMetrics structure - don't delete or flatten it
     if (processed.scoringMetrics) {
-      // For fit score queries, ensure we preserve the full structure
-      if (context === 'fit_score_query' || context === 'top_n_query') {
+      // For intent_score queries, preserve the full intent_score structure
+      if (context === 'intent_score_query') {
+        logger.debug('DocumentCleaner: Preserving intent_score structure', {
+          hasScoringMetrics: !!processed.scoringMetrics,
+          hasIntentScore: !!processed.scoringMetrics?.intent_score,
+          intentScoreKeys: processed.scoringMetrics?.intent_score ? Object.keys(processed.scoringMetrics.intent_score) : []
+        });
+        
+        // Keep the full scoringMetrics.intent_score structure intact
+        if (processed.scoringMetrics?.intent_score) {
+          // Preserve the entire intent_score object including all nested fields
+          // Only compress arrays if they're too large (e.g., signal_breakdown)
+          if (processed.scoringMetrics.intent_score.signal_breakdown && 
+              Array.isArray(processed.scoringMetrics.intent_score.signal_breakdown) &&
+              processed.scoringMetrics.intent_score.signal_breakdown.length > 10) {
+            // Limit signal_breakdown to top 10 most important signals
+            processed.scoringMetrics.intent_score.signal_breakdown = 
+              processed.scoringMetrics.intent_score.signal_breakdown
+                .slice(0, 10)
+                .map((signal: any) => {
+                  // Compress events arrays within signals
+                  if (signal.events_detected?.events && Array.isArray(signal.events_detected.events)) {
+                    signal.events_detected.events = signal.events_detected.events.slice(0, 5);
+                  }
+                  return signal;
+                });
+          }
+          // DO NOT delete or compress other intent_score fields - preserve full structure
+          logger.debug('DocumentCleaner: Intent_score preserved', {
+            hasAnalysisMetadata: !!processed.scoringMetrics.intent_score.analysis_metadata,
+            hasSignalBreakdown: !!processed.scoringMetrics.intent_score.signal_breakdown,
+            hasGtmIntelligence: !!processed.scoringMetrics.intent_score.gtm_intelligence,
+            signalBreakdownLength: processed.scoringMetrics.intent_score.signal_breakdown?.length || 0
+          });
+        } else {
+          logger.warn('DocumentCleaner: Intent_score query but no intent_score data found', {
+            hasScoringMetrics: !!processed.scoringMetrics,
+            scoringMetricsKeys: processed.scoringMetrics ? Object.keys(processed.scoringMetrics) : []
+          });
+        }
+        // DO NOT delete scoringMetrics - preserve it for intent_score queries
+      } else if (context === 'fit_score_query' || context === 'top_n_query') {
         // Keep the scoringMetrics structure intact, but ensure it has the correct nested structure
         if (processed.scoringMetrics.fit_score) {
           // Structure is already correct: scoringMetrics.fit_score.score

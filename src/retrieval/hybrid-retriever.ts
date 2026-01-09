@@ -29,6 +29,7 @@ export class HybridRetriever {
       limit?: number;
       sort?: Record<string, any>;
       includeRelated?: boolean;
+      originalQuery?: string; // Pass original user query for context-aware field detection
     } = {}
   ): Promise<RetrievedData[]> {
     const { limit = 20, sort, includeRelated = false } = options;
@@ -60,13 +61,15 @@ export class HybridRetriever {
     });
     
     // Execute search with planner's query
+    // CRITICAL: Pass originalQuery as textQuery for context-aware field detection (e.g., intent_score_query)
+    // This allows the search service to detect field-specific queries and preserve relevant data
     const searchQuery: SearchQuery = {
       collection,
       userId,
       filter: sanitizedQuery,
       limit,
       sort,
-      textQuery: undefined, // Don't use text search when we have planner query
+      textQuery: options.originalQuery, // Pass original query for field context detection
       vectorQuery: undefined
     };
 
